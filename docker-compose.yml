@@ -1,0 +1,14 @@
+version: '3.8'
+
+services:
+  geo-qa-agent:
+    build: .
+    ports:
+      - "8501:8501"
+    volumes:
+      # This maps your local data folder to the container so you don't have to rebuild 
+      # the container every time you add a new TIFF!
+      - ./data:/app/data 
+    environment:
+      # Passes your API key securely to the container
+      - OPENAI_API_KEY=${OPENAI_API_KEY}

@@ -1,0 +1,22 @@
+# Security (NEVER UPLOAD THESE)
+.env
+
+# Virtual Environments
+venv/
+env/
+.venv/
+
+# Python Cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Massive Data Files & Databases (Don't upload massive TIFFs to GitHub)
+data/
+*.duckdb
+*.db
+*.sqlite3
+
+# OS generated files
+.DS_Store
+Thumbs.db
