@@ -1,10 +1,10 @@
-# --- Geospatial & Image Processing ---
-geopandas>=1.0.0
-shapely>=2.0.0
-rasterio>=1.3.0
+# --- Vision & Processing ---
 opencv-python-headless>=4.9.0
 numpy>=1.26.0,<2.0.0
 matplotlib>=3.8.0
+rasterio>=1.3.0
+geopandas>=1.0.0
+shapely>=2.0.0
 
 # --- Data Manipulation & Database ---
 pandas>=2.2.0
@@ -20,11 +20,12 @@ langchain==0.2.6
 langchain-core==0.2.11
 langchain-openai==0.1.14
 langchain-community==0.2.6
-python-dotenv>=1.0.0
 langgraph>=0.2.0,<0.3.0
+python-dotenv>=1.0.0
 
-# --- Frontend & API ---
+# --- Frontend, API & Networking ---
 streamlit>=1.32.0
 Pillow>=10.2.0
 fastapi>=0.110.0
 uvicorn>=0.29.0
+requests>=2.31.0

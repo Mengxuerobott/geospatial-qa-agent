@@ -4,6 +4,7 @@ import os
 import sys
 import duckdb
 from langchain_core.messages import HumanMessage
+import requests
 
 # Add the src folder to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -77,8 +78,12 @@ with col1:
         else:
             st.warning("Database not found. Run pipeline.py first.")
 
+
 with col2:
     st.subheader("💬 Chat with Multi-Agent Supervisor")
+    
+    # Use environment variable for Docker, default to localhost for local testing
+    API_URL = os.getenv("API_URL", "http://localhost:8000/chat")
     
     # Display chat history
     for msg in st.session_state.messages:
@@ -93,18 +98,19 @@ with col2:
         with st.chat_message("user"):
             st.markdown(prompt)
             
-        # 2. Call the LangGraph Agent
+        # 2. Call the FastAPI Backend
         with st.chat_message("assistant"):
-            with st.spinner("Supervisor is coordinating Data & Vision Agents..."):
-                
-                # --- NEW: LangGraph invocation format ---
-                response = st.session_state.agent.invoke(
-                    {"messages": [HumanMessage(content=prompt)]}
-                )
-                
-                # LangGraph returns a dictionary of the state. The final answer is the last message.
-                answer = response["messages"][-1].content
-                st.markdown(answer)
-                
-        # 3. Save assistant response to history
-        st.session_state.messages.append({"role": "assistant", "content": answer})
+            with st.spinner("Supervisor is coordinating Data & Vision Agents via API..."):
+                try:
+                    # Send HTTP POST request to FastAPI
+                    response = requests.post(API_URL, json={"message": prompt})
+                    
+                    if response.status_code == 200:
+                        answer = response.json()["reply"]
+                        st.markdown(answer)
+                        # Save assistant response to history
+                        st.session_state.messages.append({"role": "assistant", "content": answer})
+                    else:
+                        st.error(f"API Error {response.status_code}: {response.text}")
+                except requests.exceptions.ConnectionError:
+                    st.error("❌ Could not connect to the Backend API. Is FastAPI running?")
