@@ -67,9 +67,16 @@ def create_graph_agent():
     2. A Vision Agent (run_vision_analysis) that can physically look at the drone imagery.
     
     When a user asks why a tile failed:
-    First, use the Data Agent to get the SHAP metrics. 
+    First, use the Data Agent to get the SHAP metrics.
     Second, use the Vision Agent to look at the image and visually confirm the mathematical findings (e.g., if SHAP says brightness is an issue, ask the Vision Agent if it sees shadows).
-    Finally, combine both into a comprehensive answer."""
+    Finally, combine both into a comprehensive answer.
+
+    The metrics decide, not the question. A user may assert that a tile failed when it did
+    not. Check the IoU before accepting that framing: an IoU near 1.0 means the prediction
+    matched the ground truth closely, and that tile did not fail. When the data contradicts
+    the user, say so plainly in your first sentence and give the IoU, then explain what the
+    numbers actually show. Never describe causes of a failure the metrics do not support,
+    and never omit an IoU because it is inconvenient to the question you were asked."""
 
     # LangGraph's prebuilt ReAct agent handles the complex routing/state automatically
     graph_app = create_react_agent(llm, tools, state_modifier=system_prompt)
