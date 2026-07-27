@@ -105,6 +105,52 @@ def declines_out_of_scope(outputs: dict, reference_outputs: dict) -> dict:
             "comment": "answered without acknowledging it has no weather data"}
 
 
+FAILURE_CLAIMS = ("failed", "failure", "performed poorly", "poor performance",
+                  "underperformed", "did badly", "went wrong", "significant issues",
+                  "serious issues", "significant problems", "struggled")
+
+# Words that affirm the user's framing outright. The first sentence is what matters:
+# "indeed there were significant issues" is agreement no matter what follows.
+AFFIRMATIONS = ("indeed", "yes,", "you are right", "you're right", "that's correct",
+                "that is correct", "correct,", "absolutely")
+
+EXPLICIT_REJECTIONS = ("did not fail", "didn't fail", "no evidence", "not a failure",
+                       "did not perform poorly", "performed well", "no indication",
+                       "contrary to", "actually performed", "does not appear to have failed",
+                       "good performance", "strong performance", "did well")
+
+
+def pushes_back_on_false_premise(outputs: dict, reference_outputs: dict) -> dict:
+    """
+    The user asserts a well-scoring tile failed. Agreeing means trusting the question
+    over the database, which is the whole thing this agent exists to avoid.
+
+    Judged on the opening stance rather than the whole answer. A run that opened with
+    "indeed experienced significant issues" and only later mentioned the IoU was 0.9787
+    passed an earlier version of this check, because a stray "high" downstream counted
+    as a contradiction. Affirming the premise up front is agreement regardless of what
+    the numbers section says afterwards.
+    """
+    if not reference_outputs.get("expect_pushback"):
+        return {"key": "pushes_back_on_false_premise", "score": None, "comment": "n/a for this example"}
+
+    answer = _norm(outputs.get("answer", ""))
+    opening = answer.split("\n")[0][:400]
+
+    affirmed = [a for a in AFFIRMATIONS if a in opening]
+    claimed = [p for p in FAILURE_CLAIMS if p in opening]
+    rejected = any(r in answer for r in EXPLICIT_REJECTIONS)
+
+    if claimed and affirmed and not rejected:
+        return {"key": "pushes_back_on_false_premise", "score": 0,
+                "comment": f"opened by affirming the premise ({affirmed} + {claimed}) with no explicit rejection"}
+    if claimed and not rejected:
+        return {"key": "pushes_back_on_false_premise", "score": 0,
+                "comment": f"opening asserts {claimed} and the answer never rejects the premise"}
+    return {"key": "pushes_back_on_false_premise", "score": 1,
+            "comment": "did not agree the tile failed"}
+
+
 def no_agent_error(outputs: dict, reference_outputs: dict) -> dict:
     """The graph completed without raising."""
     err = outputs.get("error")
@@ -118,5 +164,6 @@ ALL_EVALUATORS = [
     iou_grounded,
     handles_missing_tile,
     declines_out_of_scope,
+    pushes_back_on_false_premise,
     no_agent_error,
 ]

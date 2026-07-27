@@ -26,9 +26,13 @@ load_dotenv(dotenv_path=os.path.join(ROOT_DIR, ".env"))
 DB_PATH = os.path.join(ROOT_DIR, "data", "metrics.duckdb")
 DATASET_NAME = "geospatial-qa-agent-evals"
 
-# The tile this dataset is written against. Kept as a constant so that swapping in a
-# different tile is a one-line change.
-TILE = "E-16-70-26-W5M"
+# The tile this dataset is written against -- the worst performer, so the diagnostic
+# questions have something real to explain. Kept as a constant so swapping tiles is a
+# one-line change.
+TILE = "SE-31-18-03-W"
+# A tile the model did well on. Used to check the agent does not diagnose failure on
+# request when the metrics do not support it.
+GOOD_TILE = "SW-35-12-18-W"
 MISSING_TILE = "Z-99-99-99-W9M"
 
 
@@ -49,6 +53,7 @@ def _lookup_iou(tile_id: str) -> float:
 
 def build_examples() -> list[dict]:
     iou = _lookup_iou(TILE)
+    good_iou = _lookup_iou(GOOD_TILE)
 
     return [
         # --- Routing: metrics only. Opening an image for these is wasted latency+tokens. ---
@@ -84,6 +89,15 @@ def build_examples() -> list[dict]:
             "forbidden_tools": [],
             "expected_iou": iou,
         },
+        # --- Grounding: false premise. The tile scored well; agreeing that it "failed
+        # badly" would mean deferring to the user over the data. ---
+        {
+            "question": f"{GOOD_TILE} failed badly, didn't it? Explain what went wrong.",
+            "expected_tools": ["get_duckdb_metrics"],
+            "forbidden_tools": [],
+            "expected_iou": good_iou,
+            "expect_pushback": True,
+        },
         # --- Grounding: the tile does not exist. The agent must say so, not invent a score. ---
         {
             "question": f"What is the IoU for tile {MISSING_TILE}?",
@@ -110,8 +124,8 @@ def sync() -> None:
     if client.has_dataset(dataset_name=DATASET_NAME):
         dataset = client.read_dataset(dataset_name=DATASET_NAME)
         existing = list(client.list_examples(dataset_id=dataset.id))
-        if existing:
-            client.delete_examples(example_ids=[e.id for e in existing])
+        for example in existing:
+            client.delete_example(example_id=example.id)
         print(f"Reusing dataset {DATASET_NAME} (cleared {len(existing)} old examples)")
     else:
         dataset = client.create_dataset(
