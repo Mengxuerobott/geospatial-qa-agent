@@ -5,6 +5,7 @@ import pandas as pd
 import geopandas as gpd
 import rasterio
 import duckdb
+import zipfile
 import xgboost as xgb
 import shap
 import warnings
@@ -35,13 +36,48 @@ def get_image_metrics(tiff_path):
         print(f"Error reading {tiff_path}: {e}")
         return None, None
 
+def shapefile_uri(zip_path):
+    """
+    Build a GeoPandas URI for the .shp inside a zipped shapefile.
+
+    Some exports put the files at the archive root, others wrap them in a folder named
+    after the tile. A bare zip:// URI only finds the former, so locate the .shp and
+    address it explicitly. Returns None if the archive holds no shapefile.
+    """
+    if not os.path.exists(zip_path):
+        return None
+
+    with zipfile.ZipFile(zip_path) as archive:
+        # __MACOSX holds resource-fork stubs that look like real entries but are not.
+        shps = [n for n in archive.namelist()
+                if n.lower().endswith('.shp') and not n.startswith('__MACOSX/')]
+
+    if not shps:
+        return None
+    if len(shps) > 1:
+        print(f"  -> Warning: {os.path.basename(zip_path)} holds {len(shps)} shapefiles, using {shps[0]}")
+
+    inner = shps[0]
+    return f"zip://{zip_path}" if '/' not in inner else f"zip://{zip_path}!{inner}"
+
+
 def get_spatial_metrics(gt_path, pred_path, tiff_path):
+    """
+    Buffer-tolerant IoU between ground truth and prediction.
+
+    Returns None when the comparison could not be made at all -- missing or unreadable
+    shapefiles, a CRS that will not project. That is deliberately distinct from 0.0,
+    which means the geometries were read fine and simply do not overlap. Collapsing the
+    two hid three unreadable archives behind a plausible-looking score.
+    """
     try:
-        gt_uri = f"zip://{gt_path}" if os.path.exists(gt_path) else None
-        pred_uri = f"zip://{pred_path}" if os.path.exists(pred_path) else None
-        
+        gt_uri = shapefile_uri(gt_path)
+        pred_uri = shapefile_uri(pred_path)
+
         if not gt_uri or not pred_uri:
-            return 0.0 
+            missing = [n for n, u in (("ground truth", gt_uri), ("prediction", pred_uri)) if not u]
+            print(f"  -> Skipping: no readable shapefile for {' and '.join(missing)}")
+            return None
 
         gt_gdf = gpd.read_file(gt_uri)
         pred_gdf = gpd.read_file(pred_uri)
@@ -79,9 +115,9 @@ def get_spatial_metrics(gt_path, pred_path, tiff_path):
         
         return intersection / union if union > 0 else 0.0
     except Exception as e:
-        print(f"Error calculating spatial metrics: {e}")
-        return 0.0
-           
+        print(f"  -> Skipping: could not compare geometries: {e}")
+        return None
+
 
 @traceable(run_type="chain", name="train_and_explain")
 def train_and_explain(df):
@@ -108,6 +144,7 @@ def train_and_explain(df):
 def run_pipeline():
     print("🚀 Starting the Geospatial QA Data Pipeline...")
     results = []
+    skipped = []
     tiff_files = glob.glob(os.path.join(TIFF_DIR, '*.tif'))
     
     if not tiff_files:
@@ -124,11 +161,21 @@ def run_pipeline():
         brightness, contrast = get_image_metrics(tiff_path)
         iou = get_spatial_metrics(gt_path, pred_path, tiff_path)
         
-        if brightness is not None:
-            results.append({
-                'tile_id': tile_id, 'brightness': brightness, 
-                'contrast': contrast, 'iou': iou
-            })
+        if brightness is None or iou is None:
+            skipped.append(tile_id)
+            continue
+
+        results.append({
+            'tile_id': tile_id, 'brightness': brightness,
+            'contrast': contrast, 'iou': iou
+        })
+
+    if skipped:
+        print(f"\n⚠️  Skipped {len(skipped)} tile(s) with unusable data: {', '.join(skipped)}")
+
+    if not results:
+        print("❌ No tile produced usable metrics. Nothing written to the database.")
+        return
 
     df = pd.DataFrame(results)
 
