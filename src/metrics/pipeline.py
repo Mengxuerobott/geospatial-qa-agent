@@ -8,8 +8,14 @@ import duckdb
 import xgboost as xgb
 import shap
 import warnings
+from dotenv import load_dotenv
+from langsmith import traceable
 
 warnings.filterwarnings('ignore')
+
+# --- Robust Dotenv Loading (must run before any traceable call) ---
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+load_dotenv(dotenv_path=os.path.join(ROOT_DIR, ".env"))
 
 # --- Directory Setup ---
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data'))
@@ -77,6 +83,28 @@ def get_spatial_metrics(gt_path, pred_path, tiff_path):
         return 0.0
            
 
+@traceable(run_type="chain", name="train_and_explain")
+def train_and_explain(df):
+    """
+    Trains the XGBoost meta-model on spatial error and attaches per-tile SHAP values.
+    Returns the dataframe with shap_brightness / shap_contrast columns added.
+    """
+    print("🧠 Training XGBoost Meta-Model on spatial errors...")
+    X = df[['brightness', 'contrast']]
+    y = 1.0 - df['iou']
+
+    model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=50, max_depth=3)
+    model.fit(X, y)
+
+    print("🔍 Generating SHAP Values...")
+    explainer = shap.TreeExplainer(model)
+    shap_values = explainer(X)
+
+    df['shap_brightness'] = shap_values.values[:, 0]
+    df['shap_contrast'] = shap_values.values[:, 1]
+    return df
+
+@traceable(run_type="chain", name="run_pipeline")
 def run_pipeline():
     print("🚀 Starting the Geospatial QA Data Pipeline...")
     results = []
@@ -103,21 +131,9 @@ def run_pipeline():
             })
 
     df = pd.DataFrame(results)
-    
-    print("🧠 Training XGBoost Meta-Model on spatial errors...")
-    X = df[['brightness', 'contrast']]
-    y = 1.0 - df['iou'] 
-    
-    model = xgb.XGBRegressor(objective='reg:squarederror', n_estimators=50, max_depth=3)
-    model.fit(X, y)
-    
-    print("🔍 Generating SHAP Values...")
-    explainer = shap.TreeExplainer(model)
-    shap_values = explainer(X)
-    
-    df['shap_brightness'] = shap_values.values[:, 0]
-    df['shap_contrast'] = shap_values.values[:, 1]
-    
+
+    df = train_and_explain(df)
+
     print(f"💾 Saving complete dataset to DuckDB at {DB_PATH}...")
     conn = duckdb.connect(DB_PATH)
     conn.execute("CREATE OR REPLACE TABLE tile_metrics AS SELECT * FROM df")

@@ -6,6 +6,7 @@ import numpy as np
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
 from langchain_openai import ChatOpenAI
+from langsmith import traceable
 
 # --- Robust Dotenv Loading ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -16,6 +17,16 @@ load_dotenv(dotenv_path=env_path)
 if not os.getenv("OPENAI_API_KEY"):
     raise ValueError(f"CRITICAL: OPENAI_API_KEY not found. Checked path: {env_path}")
 
+def _summarize_b64(outputs) -> dict:
+    """
+    Keep the base64 payload out of the trace; log only its size.
+    LangSmith hands this the raw return value (a str) for single-value returns,
+    but a dict when the traced function returns one -- handle both.
+    """
+    b64 = outputs.get("output", "") if isinstance(outputs, dict) else (outputs or "")
+    return {"base64_chars": len(b64)}
+
+@traceable(run_type="tool", name="encode_and_resize_tiff", process_outputs=_summarize_b64)
 def encode_and_resize_tiff(tiff_path: str, max_size: int = 1024) -> str:
     """
     Reads a massive drone TIFF, extracts RGB, resizes it to a safe dimension, 
@@ -51,6 +62,7 @@ def encode_and_resize_tiff(tiff_path: str, max_size: int = 1024) -> str:
         # Convert the buffer to a base64 string
         return base64.b64encode(buffer).decode('utf-8')
 
+@traceable(run_type="chain", name="analyze_image_visually")
 def analyze_image_visually(image_path: str, user_prompt: str) -> str:
     """
     Sends a resized image and a text prompt to GPT-4o-mini for visual analysis.
