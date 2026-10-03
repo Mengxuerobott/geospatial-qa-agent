@@ -16,6 +16,7 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from evals.evaluators import (  # noqa: E402
+    correct_tile,
     correct_tools,
     declines_out_of_scope,
     handles_missing_tile,
@@ -61,6 +62,39 @@ def test_correct_tools_fails_when_only_one_of_two_called():
                       {"expected_tools": ["get_duckdb_metrics", "run_vision_analysis"],
                        "forbidden_tools": []})
     assert r["score"] == 0
+
+
+# --- correct_tile -----------------------------------------------------------------
+
+def tiles(*queried):
+    return {**out(), "tool_tiles": list(queried)}
+
+
+def test_correct_tile_passes_when_all_calls_name_the_expected_tile():
+    r = correct_tile(tiles("A-1", "A-1"), {"expected_tile": "A-1"})
+    assert r["score"] == 1
+
+
+def test_correct_tile_fails_on_the_previously_discussed_tile():
+    """The failure it exists for: the viewer moved to A-1, the agent answered about B-2."""
+    r = correct_tile(tiles("B-2"), {"expected_tile": "A-1"})
+    assert r["score"] == 0
+    assert "B-2" in r["comment"]
+
+
+def test_correct_tile_fails_when_one_of_several_calls_is_wrong():
+    r = correct_tile(tiles("A-1", "B-2"), {"expected_tile": "A-1"})
+    assert r["score"] == 0
+
+
+def test_correct_tile_fails_when_no_tile_was_queried():
+    r = correct_tile(tiles(), {"expected_tile": "A-1"})
+    assert r["score"] == 0
+
+
+def test_correct_tile_not_applicable_without_expected_tile():
+    r = correct_tile(tiles("B-2"), {})
+    assert r["score"] is None
 
 
 # --- iou_grounded -----------------------------------------------------------------

@@ -15,9 +15,11 @@ example.
 import argparse
 import os
 import sys
+import uuid
 
 from dotenv import load_dotenv
 from langchain_core.messages import HumanMessage
+from langgraph.checkpoint.memory import MemorySaver
 from langsmith import Client
 from langsmith.evaluation import evaluate
 
@@ -27,7 +29,8 @@ load_dotenv(dotenv_path=os.path.join(ROOT_DIR, ".env"))
 
 from evals.dataset import DATASET_NAME  # noqa: E402
 from evals.evaluators import ALL_EVALUATORS  # noqa: E402
-from src.agent.graph_agent import create_graph_agent  # noqa: E402
+from src.agent.graph_agent import create_graph_agent, with_viewer_context  # noqa: E402
+from src.agent.history import recent_turns  # noqa: E402
 
 
 def _tools_called(messages) -> list[str]:
@@ -41,17 +44,39 @@ def _tools_called(messages) -> list[str]:
     return names
 
 
-def make_target(agent):
-    def target(inputs: dict) -> dict:
-        try:
-            state = agent.invoke({"messages": [HumanMessage(content=inputs["question"])]})
-        except Exception as exc:  # surfaced by the no_agent_error evaluator
-            return {"answer": "", "tools_used": [], "error": repr(exc)}
+def _tiles_queried(messages) -> list[str]:
+    """The tile_id argument of every tool call, in order."""
+    tiles = []
+    for msg in messages:
+        for call in getattr(msg, "tool_calls", None) or []:
+            args = call.get("args") if isinstance(call, dict) else getattr(call, "args", None)
+            if args and args.get("tile_id"):
+                tiles.append(args["tile_id"])
+    return tiles
 
-        messages = state["messages"]
+
+def make_target(agent):
+    """
+    `agent` must have a checkpointer. Each example runs on its own thread: any "history"
+    turns are replayed first, then the question. Only the final turn is reported, so a
+    single-turn example is scored exactly as it was before conversations existed.
+    """
+    def target(inputs: dict) -> dict:
+        config = {"configurable": {"thread_id": str(uuid.uuid4())}}
+        turns = list(inputs.get("history") or []) + [inputs]
+
+        try:
+            for turn in turns:
+                content = with_viewer_context(turn["question"], turn.get("selected_tile"))
+                state = agent.invoke({"messages": [HumanMessage(content=content)]}, config=config)
+        except Exception as exc:  # surfaced by the no_agent_error evaluator
+            return {"answer": "", "tools_used": [], "tool_tiles": [], "error": repr(exc)}
+
+        final_turn = recent_turns(state["messages"], max_turns=1)
         return {
-            "answer": messages[-1].content,
-            "tools_used": _tools_called(messages),
+            "answer": final_turn[-1].content,
+            "tools_used": _tools_called(final_turn),
+            "tool_tiles": _tiles_queried(final_turn),
             "error": None,
         }
 
@@ -70,7 +95,8 @@ def main() -> None:
     if not client.has_dataset(dataset_name=DATASET_NAME):
         raise SystemExit(f"Dataset {DATASET_NAME} not found. Run `python evals/dataset.py` first.")
 
-    agent = create_graph_agent()
+    # Same configuration as the API: with memory, so multi-turn examples can be replayed.
+    agent = create_graph_agent(checkpointer=MemorySaver())
 
     results = evaluate(
         make_target(agent),

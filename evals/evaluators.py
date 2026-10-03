@@ -52,6 +52,30 @@ def correct_tools(outputs: dict, reference_outputs: dict) -> dict:
             "comment": f"called {sorted(called) or 'nothing'}"}
 
 
+def correct_tile(outputs: dict, reference_outputs: dict) -> dict:
+    """
+    Every tool call in the final turn named the expected tile, and at least one did.
+
+    This is the check for conversation context: when the question has no tile ID, the
+    agent has to take it from the viewer or the earlier turns, and the wrong tile produces
+    a fluent, well-grounded answer about something the user did not ask about.
+    """
+    expected = reference_outputs.get("expected_tile")
+    if expected is None:
+        return {"key": "correct_tile", "score": None, "comment": "n/a for this example"}
+
+    queried = outputs.get("tool_tiles") or []
+    wrong = sorted({t for t in queried if t != expected})
+
+    if wrong:
+        return {"key": "correct_tile", "score": 0,
+                "comment": f"called tools on {wrong}; the question was about {expected}"}
+    if not queried:
+        return {"key": "correct_tile", "score": 0,
+                "comment": f"no tool call named a tile; expected {expected}"}
+    return {"key": "correct_tile", "score": 1, "comment": f"all tool calls on {expected}"}
+
+
 def iou_grounded(outputs: dict, reference_outputs: dict) -> dict:
     """
     If the tile has a real IoU, the answer must quote it and must not quote a different one.
@@ -204,6 +228,7 @@ def no_agent_error(outputs: dict, reference_outputs: dict) -> dict:
 
 ALL_EVALUATORS = [
     correct_tools,
+    correct_tile,
     iou_grounded,
     handles_missing_tile,
     declines_out_of_scope,

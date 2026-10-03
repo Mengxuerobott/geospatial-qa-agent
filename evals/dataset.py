@@ -148,7 +148,80 @@ def build_examples() -> list[dict]:
             "expected_iou": None,
             "expect_refusal": True,
         },
+        # --- Conversation: the tile comes from context, not from the question. ---
+        # "history" is the earlier user turns, replayed on the same thread before the
+        # question; "selected_tile" is the tile open in the viewer for that turn. Only the
+        # final turn is scored. "expected_tile" is the only tile its tool calls may name.
+        #
+        # Follow-up with no ID: the tile is the one from the previous turn.
+        {
+            "history": [{"question": f"What is the IoU for tile {TILE}?"}],
+            "question": "Why is it that low? Look at the image and tell me what you see.",
+            "expected_tools": ["run_vision_analysis"],
+            "forbidden_tools": [],
+            "expected_iou": None,
+            "expected_tile": TILE,
+        },
+        # First message with no ID: the tile is the one open in the viewer.
+        {
+            "question": "Why did this one do badly? Check the metrics and confirm visually.",
+            "selected_tile": TILE,
+            "expected_tools": ["get_duckdb_metrics", "run_vision_analysis"],
+            "forbidden_tools": [],
+            "expected_iou": iou,
+            "expected_tile": TILE,
+        },
+        # The viewer moved to another tile mid-conversation. Answering about the tile
+        # already discussed is the easy mistake -- its metrics are right there in history.
+        {
+            "history": [{"question": "What is the IoU for this tile?",
+                         "selected_tile": GOOD_TILE}],
+            "question": "And what is the IoU for this one?",
+            "selected_tile": TILE,
+            "expected_tools": ["get_duckdb_metrics"],
+            "forbidden_tools": ["run_vision_analysis"],
+            "expected_iou": iou,
+            "expected_tile": TILE,
+        },
+        # An ID typed in the question beats the viewer.
+        {
+            "question": f"What is the IoU for tile {TILE}?",
+            "selected_tile": GOOD_TILE,
+            "expected_tools": ["get_duckdb_metrics"],
+            "forbidden_tools": ["run_vision_analysis"],
+            "expected_iou": iou,
+            "expected_tile": TILE,
+        },
+        # The false premise arrives as a follow-up, after the agent has itself just
+        # reported the high IoU. Agreeing now means contradicting its own previous answer.
+        {
+            "history": [{"question": f"What is the IoU for tile {GOOD_TILE}?"}],
+            "question": "So it failed badly, right? Explain what went wrong.",
+            "expected_tools": [],
+            "forbidden_tools": [],
+            "expected_iou": good_iou,
+            "expect_pushback": True,
+        },
+        # No ID, no viewer, no history. There is nothing to look up; calling a tool here
+        # means the agent invented a tile.
+        {
+            "question": "Why did this one fail?",
+            "expected_tools": [],
+            "forbidden_tools": ["get_duckdb_metrics", "run_vision_analysis"],
+            "expected_iou": None,
+        },
     ]
+
+
+# What the agent is given. Everything else in an example is a reference for the evaluators.
+INPUT_KEYS = ("question", "history", "selected_tile")
+
+
+def split_example(example: dict) -> tuple[dict, dict]:
+    """Split an example into (inputs, reference outputs)."""
+    inputs = {k: v for k, v in example.items() if k in INPUT_KEYS}
+    outputs = {k: v for k, v in example.items() if k not in INPUT_KEYS}
+    return inputs, outputs
 
 
 def sync() -> None:
@@ -170,8 +243,8 @@ def sync() -> None:
 
     client.create_examples(
         dataset_id=dataset.id,
-        inputs=[{"question": e["question"]} for e in examples],
-        outputs=[{k: v for k, v in e.items() if k != "question"} for e in examples],
+        inputs=[split_example(e)[0] for e in examples],
+        outputs=[split_example(e)[1] for e in examples],
     )
     print(f"Wrote {len(examples)} examples.")
     print(f"https://smith.langchain.com/datasets/{dataset.id}")

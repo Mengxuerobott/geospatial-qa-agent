@@ -158,7 +158,7 @@ The dataset lives in `evals/dataset.py` rather than only in the LangSmith UI, so
 and reviewable. Reference IoU values are read out of DuckDB at sync time instead of being
 hardcoded, so re-running the pipeline on different imagery doesn't silently invalidate them.
 
-Eleven examples covering four things:
+Seventeen examples covering five things:
 
 - **routing** — metrics-only questions must not open a 300 MB TIFF; visual questions must;
   diagnostic questions need both
@@ -169,11 +169,17 @@ Eleven examples covering four things:
   four different shapes: a leading question, a wrong number stated as fact, a writing task
   where the user has already decided, and an attributed cause plausible enough to want to
   confirm
+- **conversation** — six cases where the tile is not in the question and has to come from
+  the earlier turns or from the tile open in the viewer: a follow-up, a first message with
+  no ID, the viewer switching tiles mid-conversation, a typed ID overriding the viewer, a
+  false premise arriving as a follow-up, and a question with no tile anywhere. Earlier turns
+  are replayed on one thread and only the final turn is scored; `correct_tile` checks that
+  every tool call in it named the right tile
 
-Five of the six scorers are code, not LLM-as-judge. Tool routing and quoted numbers have exact
+Six of the seven scorers are code, not LLM-as-judge. Tool routing and quoted numbers have exact
 answers checkable against the database, so a judge would be slower, cost money, and add noise.
 
-The sixth is a judge, and the reason is worth reading before copying the pattern. Whether an
+The seventh is a judge, and the reason is worth reading before copying the pattern. Whether an
 answer accepted a false premise is a question about stance. Two string-matching versions of
 that check both scored real sycophantic answers as passes — one missed "indeed experienced
 significant issues", the next missed "did not perform well" with the IoU quietly dropped. Each
