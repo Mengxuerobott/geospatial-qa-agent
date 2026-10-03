@@ -7,6 +7,8 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain.tools import tool
 from langgraph.prebuilt import create_react_agent
 
+from src.agent.history import recent_turns
+
 # Add vision tool import
 from src.agent.vision_tool import analyze_image_visually
 
@@ -109,8 +111,26 @@ def create_graph_agent(checkpointer=None):
     and never omit an IoU because it is inconvenient to the question you were asked."""
 
     # LangGraph's prebuilt ReAct agent handles the complex routing/state automatically
+    # Only the last few turns are sent to the LLM, so a long chat does not keep growing the
+    # prompt. The checkpointer still stores the full history; this bounds what is replayed.
+    def build_prompt(state):
+        recent = recent_turns(state["messages"])
+        prompt = [SystemMessage(content=system_prompt)]
+        dropped = sum(isinstance(m, HumanMessage) for m in state["messages"]) - sum(
+            isinstance(m, HumanMessage) for m in recent
+        )
+        if dropped:
+            # Otherwise the LLM takes the oldest turn it can see for the start of the chat.
+            prompt.append(SystemMessage(content=(
+                f"[The first {dropped} question(s) of this conversation and their answers "
+                "were removed here to save space. The next message is question "
+                f"{dropped + 1}, not the first. If the user asks about the removed part, "
+                "say you no longer have it.]"
+            )))
+        return prompt + recent
+
     graph_app = create_react_agent(
-        llm, tools, state_modifier=system_prompt, checkpointer=checkpointer
+        llm, tools, state_modifier=build_prompt, checkpointer=checkpointer
     )
     return graph_app
 
