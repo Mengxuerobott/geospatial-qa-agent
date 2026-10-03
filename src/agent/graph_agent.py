@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 import duckdb
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -52,6 +53,17 @@ def run_vision_analysis(tile_id: str, specific_question: str) -> str:
     # Calls the resizer and vision LLM we just built!
     return analyze_image_visually(tiff_path, specific_question)
 
+# --- Viewer context ---
+def with_viewer_context(message: str, selected_tile: Optional[str]) -> str:
+    """
+    Prefix a user message with the tile open in the UI, in the format the system prompt
+    describes. It goes in the message rather than the system prompt so the history records
+    which tile was on screen at each turn.
+    """
+    if not selected_tile:
+        return message
+    return f"[Viewer: tile {selected_tile} is open]\n{message}"
+
 # --- Build the LangGraph Multi-Agent Router ---
 def create_graph_agent(checkpointer=None):
     """
@@ -76,11 +88,18 @@ def create_graph_agent(checkpointer=None):
     Second, use the Vision Agent to look at the image and visually confirm the mathematical findings (e.g., if SHAP says brightness is an issue, ask the Vision Agent if it sees shadows).
     Finally, combine both into a comprehensive answer.
 
-    Follow-up questions refer to the conversation so far. If the user says "this tile",
-    "that image" or asks "why?" without a tile ID, use the tile most recently discussed.
-    Reuse metrics already in the conversation instead of querying them again, but call the
-    Vision Agent again when the follow-up asks about something visual it has not yet checked.
-    If no tile has been mentioned at all, ask which one they mean.
+    Working out which tile the user means, in this order:
+    1. A tile ID written in their message always wins.
+    2. Otherwise, if the message starts with a note like "[Viewer: tile X is open]", that is
+       the tile they are looking at on screen. "This tile", "this image", "this one" or a
+       bare "why?" mean tile X, even if an earlier turn was about a different tile.
+    3. Otherwise, use the tile most recently discussed in the conversation.
+    4. If none of these gives a tile, ask which one they mean.
+    The viewer note is added by the interface, not typed by the user; never mention it.
+
+    Reuse metrics already in the conversation for the same tile instead of querying them
+    again, but call the Vision Agent again when a follow-up asks about something visual it
+    has not yet checked.
 
     The metrics decide, not the question. A user may assert that a tile failed when it did
     not. Check the IoU before accepting that framing: an IoU near 1.0 means the prediction

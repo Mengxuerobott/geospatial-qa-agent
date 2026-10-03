@@ -10,7 +10,7 @@ from langgraph.checkpoint.memory import MemorySaver
 # Add the src folder to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
-from src.agent.graph_agent import create_graph_agent
+from src.agent.graph_agent import create_graph_agent, with_viewer_context
 
 # Initialize FastAPI App
 app = FastAPI(
@@ -29,6 +29,8 @@ class ChatRequest(BaseModel):
     message: str
     # Identifies the conversation. Omit it for a one-off question with no memory.
     thread_id: Optional[str] = None
+    # The tile open in the viewer, so "this image" can be resolved without an ID.
+    selected_tile: Optional[str] = None
 
 class ChatResponse(BaseModel):
     reply: str
@@ -48,11 +50,12 @@ def chat_with_agent(request: ChatRequest):
         print(f"📩 Received message: {request.message}")
         
         thread_id = request.thread_id or str(uuid.uuid4())
+        content = with_viewer_context(request.message, request.selected_tile)
 
         # Invoke the LangGraph agent. Only the new message is sent: the checkpointer
         # loads the earlier turns for this thread_id and appends to them.
         response = graph_agent.invoke(
-            {"messages": [HumanMessage(content=request.message)]},
+            {"messages": [HumanMessage(content=content)]},
             config={"configurable": {"thread_id": thread_id}},
         )
 

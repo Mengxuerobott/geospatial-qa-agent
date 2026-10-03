@@ -110,7 +110,11 @@ with col2:
                     # Send HTTP POST request to FastAPI
                     response = requests.post(
                         API_URL,
-                        json={"message": prompt, "thread_id": st.session_state.thread_id},
+                        json={
+                            "message": prompt,
+                            "thread_id": st.session_state.thread_id,
+                            "selected_tile": selected_tile if available_tiles else None,
+                        },
                     )
                     
                     if response.status_code == 200:
