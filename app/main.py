@@ -26,10 +26,10 @@ if "agent" not in st.session_state:
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
 
+GREETING = {"role": "assistant", "content": "Hello! I am your Multi-Agent QA Supervisor. Ask me to check the metrics for a tile, or ask me to physically look at the drone imagery to explain a failure."}
+
 if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Hello! I am your Multi-Agent QA Supervisor. Ask me to check the metrics for a tile, or ask me to physically look at the drone imagery to explain a failure."}
-    ]
+    st.session_state.messages = [GREETING]
 
 # --- Layout: Two Columns ---
 col1, col2 = st.columns([1, 1])
@@ -90,6 +90,12 @@ with col2:
     # Use environment variable for Docker, default to localhost for local testing
     API_URL = os.getenv("API_URL", "http://localhost:8000/chat")
     
+    # A new thread_id gives the agent a blank memory; the old thread is simply abandoned.
+    # This runs before the history is drawn, so the cleared chat shows on this same rerun.
+    if st.button("🆕 New conversation", help="Clear the chat and the agent's memory of it"):
+        st.session_state.thread_id = str(uuid.uuid4())
+        st.session_state.messages = [GREETING]
+
     # Display chat history
     for msg in st.session_state.messages:
         with st.chat_message(msg["role"]):
