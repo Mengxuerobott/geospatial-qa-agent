@@ -4,7 +4,7 @@ import rasterio
 import cv2
 import numpy as np
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langsmith import traceable
 
@@ -62,6 +62,21 @@ def encode_and_resize_tiff(tiff_path: str, max_size: int = 1024) -> str:
         # Convert the buffer to a base64 string
         return base64.b64encode(buffer).decode('utf-8')
 
+# Without this the model gets a bare question and an image, and tends to answer that it
+# "cannot analyze the image directly" instead of describing what is in it.
+VISION_SYSTEM_PROMPT = """You are an expert geospatial imagery annotator. The attached image is
+an aerial drone tile, downscaled from the original TIFF. A segmentation model was run on it to
+detect animal trails, and you are being asked what in the image could explain its performance.
+
+Describe what you actually see in this image: land cover (forest, shrub, grass, bare ground,
+water, snow), lighting (shadows, glare, washed-out or very dark areas), and anything that would
+make a thin trail hard to see or easy to confuse with something else. Say where in the tile it
+is (e.g. "upper left", "along the right edge").
+
+Answer the question you are asked directly and concisely. Report only what is visible; if
+something is not visible or you cannot tell at this resolution, say so rather than guessing.
+Do not give generic advice about how to inspect an image."""
+
 @traceable(run_type="chain", name="analyze_image_visually")
 def analyze_image_visually(image_path: str, user_prompt: str) -> str:
     """
@@ -91,7 +106,7 @@ def analyze_image_visually(image_path: str, user_prompt: str) -> str:
     )
     
     print("🧠 Sending resized image to GPT-4o-mini for visual analysis...")
-    response = vision_llm.invoke([message])
+    response = vision_llm.invoke([SystemMessage(content=VISION_SYSTEM_PROMPT), message])
     
     return response.content
 
@@ -102,8 +117,6 @@ if __name__ == "__main__":
     test_image_path = os.path.join(root_dir, "data", "tiffs", f"{test_tile}.tif")
     
     prompt = """
-    You are an expert Geospatial AI Data annotator. 
-    Look at this drone imagery. 
     1. Do you see dense vegetation, forests, or bare dirt?
     2. Are there any visible shadows or washed-out areas that might confuse a computer vision model trying to detect animal trails?
     Be concise.
