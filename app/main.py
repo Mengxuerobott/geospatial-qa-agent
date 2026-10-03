@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import os
 import sys
+import uuid
 import duckdb
 from langchain_core.messages import HumanMessage
 import requests
@@ -21,6 +22,10 @@ st.title("🌍 Explainable AI: Multi-Agent Geospatial QA")
 if "agent" not in st.session_state:
     st.session_state.agent = create_graph_agent()
     
+# One conversation per browser session; the API keys the agent's memory on this
+if "thread_id" not in st.session_state:
+    st.session_state.thread_id = str(uuid.uuid4())
+
 if "messages" not in st.session_state:
     st.session_state.messages = [
         {"role": "assistant", "content": "Hello! I am your Multi-Agent QA Supervisor. Ask me to check the metrics for a tile, or ask me to physically look at the drone imagery to explain a failure."}
@@ -103,7 +108,10 @@ with col2:
             with st.spinner("Supervisor is coordinating Data & Vision Agents via API..."):
                 try:
                     # Send HTTP POST request to FastAPI
-                    response = requests.post(API_URL, json={"message": prompt})
+                    response = requests.post(
+                        API_URL,
+                        json={"message": prompt, "thread_id": st.session_state.thread_id},
+                    )
                     
                     if response.status_code == 200:
                         answer = response.json()["reply"]

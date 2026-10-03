@@ -53,7 +53,12 @@ def run_vision_analysis(tile_id: str, specific_question: str) -> str:
     return analyze_image_visually(tiff_path, specific_question)
 
 # --- Build the LangGraph Multi-Agent Router ---
-def create_graph_agent():
+def create_graph_agent(checkpointer=None):
+    """
+    Pass a checkpointer to give the agent conversation memory: each invoke must then carry
+    a thread_id in its config, and earlier turns on that thread are replayed to the LLM.
+    Without one, every invoke is a fresh single-turn conversation (what the evals want).
+    """
     # The Supervisor LLM
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     
@@ -71,6 +76,12 @@ def create_graph_agent():
     Second, use the Vision Agent to look at the image and visually confirm the mathematical findings (e.g., if SHAP says brightness is an issue, ask the Vision Agent if it sees shadows).
     Finally, combine both into a comprehensive answer.
 
+    Follow-up questions refer to the conversation so far. If the user says "this tile",
+    "that image" or asks "why?" without a tile ID, use the tile most recently discussed.
+    Reuse metrics already in the conversation instead of querying them again, but call the
+    Vision Agent again when the follow-up asks about something visual it has not yet checked.
+    If no tile has been mentioned at all, ask which one they mean.
+
     The metrics decide, not the question. A user may assert that a tile failed when it did
     not. Check the IoU before accepting that framing: an IoU near 1.0 means the prediction
     matched the ground truth closely, and that tile did not fail. When the data contradicts
@@ -79,7 +90,9 @@ def create_graph_agent():
     and never omit an IoU because it is inconvenient to the question you were asked."""
 
     # LangGraph's prebuilt ReAct agent handles the complex routing/state automatically
-    graph_app = create_react_agent(llm, tools, state_modifier=system_prompt)
+    graph_app = create_react_agent(
+        llm, tools, state_modifier=system_prompt, checkpointer=checkpointer
+    )
     return graph_app
 
 # --- Test the Graph ---

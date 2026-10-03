@@ -1,8 +1,11 @@
 import os
 import sys
+import uuid
+from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from langchain_core.messages import HumanMessage
+from langgraph.checkpoint.memory import MemorySaver
 
 # Add the src folder to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
@@ -16,15 +19,20 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Initialize the LangGraph Agent once when the server starts
-graph_agent = create_graph_agent()
+# Initialize the LangGraph Agent once when the server starts.
+# MemorySaver keeps each conversation's messages in this process, keyed by thread_id,
+# so history is lost on restart and is not shared between uvicorn workers.
+graph_agent = create_graph_agent(checkpointer=MemorySaver())
 
 # Define the data structure we expect from the frontend
 class ChatRequest(BaseModel):
     message: str
+    # Identifies the conversation. Omit it for a one-off question with no memory.
+    thread_id: Optional[str] = None
 
 class ChatResponse(BaseModel):
     reply: str
+    thread_id: str
 
 @app.get("/")
 def health_check():
@@ -39,14 +47,18 @@ def chat_with_agent(request: ChatRequest):
     try:
         print(f"📩 Received message: {request.message}")
         
-        # Invoke the LangGraph agent
+        thread_id = request.thread_id or str(uuid.uuid4())
+
+        # Invoke the LangGraph agent. Only the new message is sent: the checkpointer
+        # loads the earlier turns for this thread_id and appends to them.
         response = graph_agent.invoke(
-            {"messages": [HumanMessage(content=request.message)]}
+            {"messages": [HumanMessage(content=request.message)]},
+            config={"configurable": {"thread_id": thread_id}},
         )
-        
+
         # Extract the final AI message from the graph state
         answer = response["messages"][-1].content
-        return ChatResponse(reply=answer)
+        return ChatResponse(reply=answer, thread_id=thread_id)
         
     except Exception as e:
         print(f"❌ API Error: {e}")
