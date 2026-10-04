@@ -1,27 +1,20 @@
 import streamlit as st
-import pandas as pd
 import os
 import sys
 import uuid
 import duckdb
-from langchain_core.messages import HumanMessage
 import requests
 
 # Add the src folder to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# --- NEW: Import the LangGraph Agent instead of the old one ---
-from src.agent.graph_agent import create_graph_agent
+# The agent itself runs behind the FastAPI backend; this app only talks to it over HTTP
 from src.metrics.visualizer import plot_tile_results
 
 # --- Page Config ---
 st.set_page_config(page_title="Geospatial QA Agent", layout="wide")
 st.title("🌍 Explainable AI: Multi-Agent Geospatial QA")
 
-# --- Initialize LangGraph Agent in Session State ---
-if "agent" not in st.session_state:
-    st.session_state.agent = create_graph_agent()
-    
 # One conversation per browser session; the API keys the agent's memory on this
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
