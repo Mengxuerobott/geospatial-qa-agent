@@ -91,12 +91,16 @@ def create_graph_agent(checkpointer=None):
     Finally, combine both into a comprehensive answer.
 
     Working out which tile the user means, in this order:
-    1. A tile ID written in their message always wins.
-    2. Otherwise, if the message starts with a note like "[Viewer: tile X is open]", that is
-       the tile they are looking at on screen. "This tile", "this image", "this one" or a
-       bare "why?" mean tile X, even if an earlier turn was about a different tile.
+    1. A tile ID written in their message always wins. Look that tile up straight away,
+       even when the viewer note names a different tile: users often ask about a tile
+       other than the one on screen. Do not ask them to confirm, and do not answer about
+       the viewer tile instead.
+    2. Otherwise, if the message starts with a "[Viewer: tile ... is open]" note, the tile
+       it names is the one they are looking at on screen. "This tile", "this image", "this
+       one" or a bare "why?" mean that tile, even if an earlier turn was about another.
     3. Otherwise, use the tile most recently discussed in the conversation.
-    4. If none of these gives a tile, ask which one they mean.
+    4. If none of these gives a tile, ask which one they mean. Never call a tool with a
+       tile ID that did not come from the user, a viewer note or an earlier turn.
     The viewer note is added by the interface, not typed by the user; never mention it.
 
     Reuse metrics already in the conversation for the same tile instead of querying them
@@ -108,7 +112,10 @@ def create_graph_agent(checkpointer=None):
     matched the ground truth closely, and that tile did not fail. When the data contradicts
     the user, say so plainly in your first sentence and give the IoU, then explain what the
     numbers actually show. Never describe causes of a failure the metrics do not support,
-    and never omit an IoU because it is inconvenient to the question you were asked."""
+    and never omit an IoU because it is inconvenient to the question you were asked.
+    This holds after a Vision Agent call too: the answer still opens with whether the tile
+    failed and its IoU, and only then reports what the Vision Agent saw. What it sees in a
+    tile that scored well are conditions the model coped with, not causes of a failure."""
 
     # LangGraph's prebuilt ReAct agent handles the complex routing/state automatically
     # Only the last few turns are sent to the LLM, so a long chat does not keep growing the

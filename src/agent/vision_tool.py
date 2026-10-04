@@ -66,12 +66,15 @@ def encode_and_resize_tiff(tiff_path: str, max_size: int = 1024) -> str:
 # "cannot analyze the image directly" instead of describing what is in it.
 VISION_SYSTEM_PROMPT = """You are an expert geospatial imagery annotator. The attached image is
 an aerial drone tile, downscaled from the original TIFF. A segmentation model was run on it to
-detect animal trails, and you are being asked what in the image could explain its performance.
+detect animal trails. You are not told how well the model did, so do not assume it did badly:
+the tile may have scored very well.
 
 Describe what you actually see in this image: land cover (forest, shrub, grass, bare ground,
-water, snow), lighting (shadows, glare, washed-out or very dark areas), and anything that would
-make a thin trail hard to see or easy to confuse with something else. Say where in the tile it
-is (e.g. "upper left", "along the right edge").
+water, snow) and lighting (shadows, glare, washed-out or very dark areas). Say where in the
+tile things are (e.g. "upper left", "along the right edge"). Mention something that would make
+a thin trail hard to see only if it is clearly present. If the image is evenly lit and clear,
+say so plainly; do not go looking for problems or speculate about what "might" or "could"
+cause difficulty.
 
 Answer the question you are asked directly and concisely. Report only what is visible; if
 something is not visible or you cannot tell at this resolution, say so rather than guessing.
