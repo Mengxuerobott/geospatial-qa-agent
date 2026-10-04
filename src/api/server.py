@@ -11,6 +11,7 @@ from langgraph.checkpoint.memory import MemorySaver
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from src.agent.graph_agent import create_graph_agent, with_viewer_context
+from src.agent.tiles import is_valid_tile_id
 
 # Initialize FastAPI App
 app = FastAPI(
@@ -46,6 +47,11 @@ def chat_with_agent(request: ChatRequest):
     Receives a message from the frontend, passes it to the LangGraph Multi-Agent,
     and returns the synthesized response.
     """
+    # selected_tile is put into the prompt, so it must look like a tile ID and nothing else.
+    # Checked outside the try block: the handler below would turn this into a 500.
+    if request.selected_tile is not None and not is_valid_tile_id(request.selected_tile):
+        raise HTTPException(status_code=422, detail="selected_tile is not a valid tile ID.")
+
     try:
         print(f"📩 Received message: {request.message}")
         

@@ -81,7 +81,8 @@ checkpointer every call is a fresh single-turn conversation.
 | `thread_id` | identifies the conversation; omit it for a one-off question with no memory |
 | `selected_tile` | the tile open in the viewer, passed to the agent as a `[Viewer: tile … is open]` prefix on the message |
 
-The response is `reply` and the `thread_id` that was used.
+The response is `reply` and the `thread_id` that was used. A `selected_tile` that does not
+look like a tile ID gets a 422.
 
 **Frontend** (`app/main.py`)
 Left column renders the tile with ground truth in green and predictions in red over the RGB
@@ -336,6 +337,7 @@ src/
     graph_agent.py         LangGraph supervisor + the two tools
     history.py             the window of recent turns sent to the LLM
     verdict.py             the IoU threshold below which a tile fails
+    tiles.py               what a tile ID may look like
     vision_tool.py         TIFF → resized JPEG → base64, and the vision call
     qa_agent.py            earlier single-agent version, unused
   metrics/
@@ -357,6 +359,7 @@ tests/
   test_pipeline.py         padding and the alpha band stay out of the image metrics
   test_shapefiles.py       zipped shapefiles are found at the root or in a folder
   test_verdict.py          the pass/fail cut-off and its scorer
+  test_tiles.py            paths and sentences are not tile IDs
 ```
 
 ## Notes
@@ -378,10 +381,12 @@ tests/
   named after the tile. The pipeline and the map viewer handle both, through the same helper. It skips tiles it cannot read rather than
   recording them as IoU 0.0, because that is indistinguishable from a prediction that simply
   missed — an earlier version silently wrote three fabricated scores and trained on them.
-- Tile IDs reach the tools from the LLM. The SQL binds them as parameters, but
-  `run_vision_analysis` still builds a file path from one unchecked, and `selected_tile` is
-  put into the prompt as sent. Fine for a local single-user tool, not fine if this is ever
-  exposed.
+- Tile IDs reach the tools from the LLM and the API from its clients, so they are treated
+  as untrusted. The SQL binds them as parameters. `run_vision_analysis` and the API's
+  `selected_tile` both reject anything that is not letters, digits, hyphens and underscores
+  (`src/agent/tiles.py`), which keeps an ID from climbing out of the TIFF directory or
+  carrying a sentence into the prompt. The API itself has no authentication: it is still a
+  local single-user tool.
 - Conversation memory is in-process and unbounded in storage: see
   [Conversation memory](#pieces). A SQLite or Postgres checkpointer is the fix if it needs to
   survive restarts or run on more than one worker.

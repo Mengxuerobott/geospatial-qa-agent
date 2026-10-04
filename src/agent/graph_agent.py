@@ -8,6 +8,7 @@ from langchain.tools import tool
 from langgraph.prebuilt import create_react_agent
 
 from src.agent.history import recent_turns
+from src.agent.tiles import is_valid_tile_id
 from src.agent.verdict import FAIL_IOU_THRESHOLD, verdict
 
 # Add vision tool import
@@ -57,6 +58,10 @@ def run_vision_analysis(tile_id: str, specific_question: str) -> str:
     Physically looks at the drone TIFF image to answer visual questions.
     Use this when you need to confirm if there are shadows, dense vegetation, or visual anomalies.
     """
+    # tile_id comes from the LLM and becomes part of a file path
+    if not is_valid_tile_id(tile_id):
+        return "That is not a valid tile ID."
+
     tiff_path = os.path.join(TIFF_DIR, f"{tile_id}.tif")
     if not os.path.exists(tiff_path):
         return f"Image file for {tile_id} not found."
