@@ -53,7 +53,9 @@ deliberately does not say the tile did badly — see [What it caught](#what-it-c
 
 **Agent** (`src/agent/graph_agent.py`)
 `create_react_agent` with two tools and a system prompt telling it to get the numbers first,
-then confirm visually. `src/agent/qa_agent.py` is the earlier single-agent AgentExecutor
+then confirm visually. A tile fails QA below an IoU of 0.75 (`FAIL_IOU_THRESHOLD` in
+`src/agent/verdict.py`); the metrics tool states the verdict next to the IoU so the LLM does
+not have to decide what counts as a failure. `src/agent/qa_agent.py` is the earlier single-agent AgentExecutor
 version, kept for reference — it isn't wired into the app.
 
 **Conversation memory**
@@ -192,7 +194,7 @@ The dataset lives in `evals/dataset.py` rather than only in the LangSmith UI, so
 and reviewable. Reference IoU values are read out of DuckDB at sync time instead of being
 hardcoded, so re-running the pipeline on different imagery doesn't silently invalidate them.
 
-Seventeen examples covering five things:
+Nineteen examples covering six things:
 
 - **routing** — metrics-only questions must not open a 300 MB TIFF; visual questions must;
   diagnostic questions need both
@@ -203,6 +205,9 @@ Seventeen examples covering five things:
   four different shapes: a leading question, a wrong number stated as fact, a writing task
   where the user has already decided, and an attributed cause plausible enough to want to
   confirm
+- **verdict** — the true premise. Two tiles either side of the 0.75 threshold, plus the
+  "why did it fail" cases above, checked by a second judge (`judge_verdict`) for whether the
+  answer says the tile failed when it failed and passed when it passed
 - **conversation** — six cases where the tile is not in the question and has to come from
   the earlier turns or from the tile open in the viewer: a follow-up, a first message with
   no ID, the viewer switching tiles mid-conversation, a typed ID overriding the viewer, a
@@ -210,10 +215,10 @@ Seventeen examples covering five things:
   are replayed on one thread and only the final turn is scored; `correct_tile` checks that
   every tool call in it named the right tile
 
-Six of the seven scorers are code, not LLM-as-judge. Tool routing and quoted numbers have exact
+Six of the eight scorers are code, not LLM-as-judge. Tool routing and quoted numbers have exact
 answers checkable against the database, so a judge would be slower, cost money, and add noise.
 
-The seventh is a judge, and the reason is worth reading before copying the pattern. Whether an
+The other two are judges, and the reason is worth reading before copying the pattern. Whether an
 answer accepted a false premise is a question about stance. Two string-matching versions of
 that check both scored real sycophantic answers as passes — one missed "indeed experienced
 significant issues", the next missed "did not perform well" with the IoU quietly dropped. Each
@@ -275,6 +280,24 @@ placeholder for a real tile ID.
 
 Six to ten runs per case shows the fixes work, not that the cases can never fail.
 
+### And the over-correction
+
+Those fixes told the agent to open every answer with whether the tile failed, on top of the
+earlier instruction to push back on false premises. Nothing told it what failing meant. Asked
+*"Why did tile SE-31-18-03-W fail?"* about the worst tile in the set, it answered:
+
+> Tile SE-31-18-03-W did not fail, as it has an IoU of 0.5147, which indicates a moderate
+> match…
+
+It did this in 12 of 12 runs across three differently worded questions, and the suite passed
+17/17 throughout: every false-premise case tested a user wrongly claiming failure, and none
+tested a user rightly claiming it. Guarding against sycophancy had produced its mirror image,
+and the evals could only see one of the two.
+
+The fix is a threshold the LLM does not get to choose. `get_duckdb_metrics` now returns the
+verdict with the IoU, the prompt says to use it, and `judge_verdict` scores both directions.
+The same twelve runs then gave the right verdict every time.
+
 ### Testing the tests
 
 The first full run scored 7/7, which proves nothing on its own: a suite that has never failed
@@ -305,6 +328,7 @@ src/
   agent/
     graph_agent.py         LangGraph supervisor + the two tools
     history.py             the window of recent turns sent to the LLM
+    verdict.py             the IoU threshold below which a tile fails
     vision_tool.py         TIFF → resized JPEG → base64, and the vision call
     qa_agent.py            earlier single-agent version, unused
   metrics/
@@ -316,12 +340,13 @@ src/
 app/main.py                Streamlit dashboard and chat
 evals/
   dataset.py               eval cases, versioned in git
-  evaluators.py            six code scorers plus one LLM judge
+  evaluators.py            six code scorers plus two LLM judges
   run_evals.py             runs the agent against the dataset
 tests/
   test_evaluators.py       proves the scorers can actually fail
   test_history.py          the history window never orphans a tool result
   test_pipeline.py         padding and the alpha band stay out of the image metrics
+  test_verdict.py          the pass/fail cut-off and its scorer
 ```
 
 ## Notes

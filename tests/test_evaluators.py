@@ -112,6 +112,20 @@ def test_iou_grounded_fails_on_hallucinated_value():
     assert r["score"] == 0
 
 
+def test_iou_grounded_allows_quoting_the_pass_threshold():
+    """'IoU below 0.75 fails' states the cut-off; it is not a second, wrong IoU."""
+    r = iou_grounded(out("The tile failed with an IoU of 0.53. Any tile with an IoU below "
+                         "0.75 is considered a failure."),
+                     {"expected_iou": TRUE_IOU})
+    assert r["score"] == 1
+
+
+def test_iou_grounded_still_fails_when_only_the_threshold_is_quoted():
+    r = iou_grounded(out("The tile failed: its IoU is below 0.75."),
+                     {"expected_iou": TRUE_IOU})
+    assert r["score"] == 0
+
+
 def test_iou_grounded_fails_when_no_number_given():
     r = iou_grounded(out("The tile performed somewhat poorly overall."),
                      {"expected_iou": TRUE_IOU})

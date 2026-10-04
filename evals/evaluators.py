@@ -17,7 +17,13 @@ the comment is what you actually read in the LangSmith UI when something regress
 """
 
 import json
+import os
 import re
+import sys
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from src.agent.verdict import FAIL_IOU_THRESHOLD  # noqa: E402
 
 NOT_FOUND_PHRASES = ("not found", "no data", "not in the database", "doesn't exist",
                      "does not exist", "no record", "unable to find", "couldn't find")
@@ -96,8 +102,12 @@ def iou_grounded(outputs: dict, reference_outputs: dict) -> dict:
                 "comment": f"expected IoU {target} absent; answer contains {sorted(quoted) or 'no decimals'}"}
 
     # Other decimals are fine (SHAP values, probabilities) -- only flag when the answer
-    # states a *different* IoU alongside the right one.
+    # states a *different* IoU alongside the right one. "An IoU below 0.75 fails" is the
+    # agent quoting the pass threshold, not claiming the tile scored 0.75, so that value is
+    # let through; the cost is that a hallucinated IoU of exactly the threshold is missed.
     for m in re.finditer(r"iou[^0-9]{0,30}(0\.\d+)", answer, flags=re.I):
+        if float(m.group(1)) == FAIL_IOU_THRESHOLD:
+            continue
         if round(float(m.group(1)), 2) != target:
             return {"key": "iou_grounded", "score": 0,
                     "comment": f"reports IoU {m.group(1)} but the true value is {target}"}
@@ -218,6 +228,66 @@ def judge_pushback(inputs: dict, outputs: dict, reference_outputs: dict) -> dict
     return {"key": "judge_pushback", "score": score, "comment": reason}
 
 
+VERDICT_JUDGE_PROMPT = """You are grading one answer from a geospatial QA assistant.
+
+The answer is about a map tile whose true IoU score is {iou:.4f}. Tiles with an IoU below
+{threshold} fail QA; the rest pass. So this tile {verdict_upper}.
+
+A correct answer makes clear that the tile {verdict}. It does not have to use that exact
+word: for a failed tile, "performed poorly", "underperformed" or "did badly" are correct;
+for a passed tile, "performed well" or "did not fail" are correct.
+
+An incorrect answer says or implies the opposite, or hedges so that a reader could not tell
+which it was -- for example calling a failed tile "a moderate match" that "did not fail", or
+describing what "went wrong" with a tile that passed. An answer that gives no verdict at
+all is incorrect.
+
+Grade only whether the verdict is right. Do not grade the explanation, the writing, or
+whether the IoU is quoted.
+
+USER QUESTION:
+{question}
+
+ASSISTANT ANSWER:
+{answer}
+
+Respond with JSON only, no code fence:
+{{"verdict": "correct" or "incorrect", "reason": "<one sentence>"}}"""
+
+
+def judge_verdict(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
+    """
+    Did the answer say the tile failed when it failed, and passed when it passed?
+
+    judge_pushback only covers a user wrongly claiming failure. This is the general case,
+    and it exists because the agent over-corrected: told to push back on false premises, it
+    began telling users that the worst tile in the set "did not fail". An LLM judge for the
+    same reason as judge_pushback -- stance is not a keyword problem.
+    """
+    expected = reference_outputs.get("expected_verdict")
+    if expected is None:
+        return {"key": "judge_verdict", "score": None, "comment": "n/a for this example"}
+
+    from langchain_openai import ChatOpenAI  # imported lazily so unit tests need no key
+
+    prompt = VERDICT_JUDGE_PROMPT.format(
+        iou=float(reference_outputs.get("expected_iou") or 0.0),
+        threshold=FAIL_IOU_THRESHOLD,
+        verdict=expected,
+        verdict_upper=expected.upper(),
+        question=(inputs or {}).get("question", "(question unavailable)"),
+        answer=outputs.get("answer", ""),
+    )
+
+    try:
+        reply = ChatOpenAI(model="gpt-4o-mini", temperature=0).invoke(prompt).content
+    except Exception as exc:
+        return {"key": "judge_verdict", "score": None, "comment": f"judge call failed: {exc}"}
+
+    score, reason = parse_judge_response(reply)
+    return {"key": "judge_verdict", "score": score, "comment": reason}
+
+
 def no_agent_error(outputs: dict, reference_outputs: dict) -> dict:
     """The graph completed without raising."""
     err = outputs.get("error")
@@ -233,5 +303,6 @@ ALL_EVALUATORS = [
     handles_missing_tile,
     declines_out_of_scope,
     judge_pushback,
+    judge_verdict,
     no_agent_error,
 ]

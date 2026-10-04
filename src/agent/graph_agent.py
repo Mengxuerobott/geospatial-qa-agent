@@ -8,6 +8,7 @@ from langchain.tools import tool
 from langgraph.prebuilt import create_react_agent
 
 from src.agent.history import recent_turns
+from src.agent.verdict import FAIL_IOU_THRESHOLD, verdict
 
 # Add vision tool import
 from src.agent.vision_tool import analyze_image_visually
@@ -40,7 +41,14 @@ def get_duckdb_metrics(tile_id: str) -> str:
         return f"Tile {tile_id} not found in the database."
     
     row = tile_data.iloc[0]
-    return f"Tile {tile_id} Metrics - IoU: {row['iou']:.4f}, Brightness SHAP impact: {row['shap_brightness']:.4f}, Contrast SHAP impact: {row['shap_contrast']:.4f}."
+    # The verdict is computed here rather than left to the LLM, which otherwise invents its
+    # own cut-off and has called a 0.51 tile "a moderate match" that "did not fail".
+    return (
+        f"Tile {tile_id} Metrics - IoU: {row['iou']:.4f} "
+        f"(QA verdict: {verdict(row['iou']).upper()}; tiles below {FAIL_IOU_THRESHOLD} fail), "
+        f"Brightness SHAP impact: {row['shap_brightness']:.4f}, "
+        f"Contrast SHAP impact: {row['shap_contrast']:.4f}."
+    )
 
 # --- Agent Tool 2: The Vision Annotator (GPT-4o Multimodal) ---
 @tool
@@ -90,6 +98,8 @@ def create_graph_agent(checkpointer=None):
     First, use the Data Agent to get the SHAP metrics.
     Second, use the Vision Agent to look at the image and visually confirm the mathematical findings (e.g., if SHAP says brightness is an issue, ask the Vision Agent if it sees shadows).
     Finally, combine both into a comprehensive answer.
+    A question about a tile's score or whether it passed needs the Data Agent only. Call the
+    Vision Agent when the user asks why, asks for a diagnosis, or asks about the image.
 
     Working out which tile the user means, in this order:
     1. A tile ID written in their message always wins. Look that tile up straight away,
@@ -108,12 +118,17 @@ def create_graph_agent(checkpointer=None):
     again, but call the Vision Agent again when a follow-up asks about something visual it
     has not yet checked.
 
-    The metrics decide, not the question. A user may assert that a tile failed when it did
-    not. Check the IoU before accepting that framing: an IoU near 1.0 means the prediction
-    matched the ground truth closely, and that tile did not fail. When the data contradicts
-    the user, say so plainly in your first sentence and give the IoU, then explain what the
-    numbers actually show. Never describe causes of a failure the metrics do not support,
-    and never omit an IoU because it is inconvenient to the question you were asked.
+    A tile FAILED if its IoU is below """ + str(FAIL_IOU_THRESHOLD) + """ and PASSED otherwise. The Data Agent states the
+    verdict next to the IoU; use that verdict and never substitute your own judgement of
+    whether a score is good enough. A failed tile failed: do not soften it to "moderate" or
+    "did not fail". A passed tile passed, however far it is from 1.0.
+
+    The metrics decide, not the question. A user may assert that a tile failed when it
+    passed, or that it did well when it failed. Check the verdict before accepting their
+    framing. When the data contradicts the user, say so plainly in your first sentence and
+    give the IoU, then explain what the numbers actually show. When the data agrees with the
+    user, say that just as plainly. Never describe causes of a failure the metrics do not
+    support, and never omit an IoU because it is inconvenient to the question you were asked.
     This holds after a Vision Agent call too: the answer still opens with whether the tile
     failed and its IoU, and only then reports what the Vision Agent saw. What it sees in a
     tile that scored well are conditions the model coped with, not causes of a failure."""

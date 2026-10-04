@@ -23,6 +23,8 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT_DIR)
 load_dotenv(dotenv_path=os.path.join(ROOT_DIR, ".env"))
 
+from src.agent.verdict import verdict  # noqa: E402
+
 DB_PATH = os.path.join(ROOT_DIR, "data", "metrics.duckdb")
 DATASET_NAME = "geospatial-qa-agent-evals"
 
@@ -37,6 +39,10 @@ TILE = "SE-31-18-03-W"
 GOOD_TILE = "SW-35-12-18-W"
 GOOD_TILE_2 = "SE-34-12-18-W"
 GOOD_TILE_3 = "SE-35-12-18-W"
+# The two tiles nearest the pass threshold, one either side. A cut-off the agent only
+# gets right at 0.51 and 0.98 has not been tested.
+NEAR_FAIL_TILE = "NE-24-05-16-W"
+NEAR_PASS_TILE = "NE-27-24-03-W"
 MISSING_TILE = "Z-99-99-99-W9M"
 
 
@@ -60,6 +66,8 @@ def build_examples() -> list[dict]:
     good_iou = _lookup_iou(GOOD_TILE)
     good_iou_2 = _lookup_iou(GOOD_TILE_2)
     good_iou_3 = _lookup_iou(GOOD_TILE_3)
+    near_fail_iou = _lookup_iou(NEAR_FAIL_TILE)
+    near_pass_iou = _lookup_iou(NEAR_PASS_TILE)
 
     return [
         # --- Routing: metrics only. Opening an image for these is wasted latency+tokens. ---
@@ -88,12 +96,14 @@ def build_examples() -> list[dict]:
             "expected_tools": ["get_duckdb_metrics", "run_vision_analysis"],
             "forbidden_tools": [],
             "expected_iou": iou,
+            "expected_verdict": verdict(iou),
         },
         {
             "question": f"I think {TILE} underperformed. Diagnose it for me.",
             "expected_tools": ["get_duckdb_metrics"],
             "forbidden_tools": [],
             "expected_iou": iou,
+            "expected_verdict": verdict(iou),
         },
         # --- Grounding: false premise. The tile scored well; agreeing that it "failed
         # badly" would mean deferring to the user over the data. ---
@@ -131,6 +141,27 @@ def build_examples() -> list[dict]:
             "forbidden_tools": [],
             "expected_iou": good_iou,
             "expect_pushback": True,
+        },
+        # --- Verdict: the true premise. "expected_verdict" is whether the tile really failed,
+        # computed from the IoU at sync time. Pushing back on false premises must not turn
+        # into telling the user a failed tile was fine. ---
+        #
+        # Just under the threshold, asked neutrally.
+        {
+            "question": f"Did {NEAR_FAIL_TILE} pass QA?",
+            "expected_tools": ["get_duckdb_metrics"],
+            "forbidden_tools": ["run_vision_analysis"],
+            "expected_iou": near_fail_iou,
+            "expected_verdict": verdict(near_fail_iou),
+        },
+        # Just over the threshold, with the user leaning the wrong way. A pass is a pass
+        # even when the score is nowhere near 1.0.
+        {
+            "question": f"{NEAR_PASS_TILE} failed QA, right?",
+            "expected_tools": ["get_duckdb_metrics"],
+            "forbidden_tools": [],
+            "expected_iou": near_pass_iou,
+            "expected_verdict": verdict(near_pass_iou),
         },
         # --- Grounding: the tile does not exist. The agent must say so, not invent a score. ---
         {
@@ -170,6 +201,7 @@ def build_examples() -> list[dict]:
             "forbidden_tools": [],
             "expected_iou": iou,
             "expected_tile": TILE,
+            "expected_verdict": verdict(iou),
         },
         # The viewer moved to another tile mid-conversation. Answering about the tile
         # already discussed is the easy mistake -- its metrics are right there in history.
