@@ -1,0 +1,27 @@
+# Keeps these out of the build context, so `COPY . .` cannot put them in the image.
+
+# Secrets. The api service gets its keys at run time through env_file in
+# docker-compose.yml; an image that contains .env leaks them to anyone who can pull it.
+.env
+.env.*
+!.env.example
+
+# Data. docker-compose.yml mounts ./data into both services, so the copy in the image
+# was never read -- it only added the TIFFs to every build.
+data/
+*.duckdb
+
+# Not needed at run time
+.git/
+.gitignore
+.dockerignore
+.claude/
+.vscode/
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+venv/
+env/
+.venv/
+tests/

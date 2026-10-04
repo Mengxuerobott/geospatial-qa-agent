@@ -126,6 +126,11 @@ docker compose up --build
 The compose setup points Streamlit at `http://api:8000/chat` via `API_URL`; running locally it
 falls back to localhost.
 
+`.dockerignore` keeps `.env` and `data/` out of the images. The `api` service reads its keys
+at run time through `env_file`, and both services get the data through the `./data` volume
+mount, so neither belongs in an image. Images built before `.dockerignore` existed contain
+your `.env`: rebuild them, and rotate the keys if those images were ever pushed anywhere.
+
 ### On Windows
 
 `pipeline.py` prints emoji. In a GBK console that raises `UnicodeEncodeError` before it does
