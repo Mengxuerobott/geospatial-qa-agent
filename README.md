@@ -9,6 +9,9 @@ match what's visible — shadows, dense vegetation, washed-out ground. The answe
 The routing between those two steps is a LangGraph ReAct agent, so the LLM decides which tool
 to call and when, rather than following a fixed script.
 
+It holds a conversation: ask about a tile, then follow up with *"why? look at the image"*, or
+select a tile in the viewer and ask *"why did this one do badly?"* without typing its ID.
+
 ## How it fits together
 
 ```
@@ -43,15 +46,45 @@ Drone TIFFs are far too large to send to an LLM. This reads the first three band
 16-bit to 8-bit if needed, downscales the long edge to 1024px, JPEG-encodes it in memory, and
 base64s it. Nothing is written to disk.
 
+The image goes to the vision model with a system prompt saying what it is (a drone tile run
+through an animal-trail segmentation model) and asking for what is visible. The prompt
+deliberately does not say the tile did badly — see [What it caught](#what-it-caught).
+
 **Agent** (`src/agent/graph_agent.py`)
 `create_react_agent` with two tools and a system prompt telling it to get the numbers first,
 then confirm visually. `src/agent/qa_agent.py` is the earlier single-agent AgentExecutor
 version, kept for reference — it isn't wired into the app.
 
+**Conversation memory**
+Passing a checkpointer to `create_graph_agent()` gives the agent memory: each call carries a
+`thread_id`, and the earlier turns on that thread are replayed to the LLM. Without a
+checkpointer every call is a fresh single-turn conversation.
+
+- Only the last six turns are sent to the LLM (`MAX_HISTORY_TURNS` in `src/agent/history.py`).
+  The cut always lands on a user message, so a tool result is never separated from the call
+  that requested it. When turns are dropped, a marker tells the model how many, so it says it
+  no longer has them rather than treating the oldest visible turn as the first.
+- When a question has no tile ID, the system prompt sets the order for finding one: an ID
+  typed in the message, then the tile open in the viewer, then the tile most recently
+  discussed. If none of those gives a tile, the agent asks.
+- The API uses LangGraph's `MemorySaver`, which lives in the server process. History is lost
+  on restart, is not shared between uvicorn workers, and is never evicted.
+
+**API** (`src/api/server.py`)
+`POST /chat` takes `message`, plus two optional fields:
+
+| Field | Meaning |
+| --- | --- |
+| `thread_id` | identifies the conversation; omit it for a one-off question with no memory |
+| `selected_tile` | the tile open in the viewer, passed to the agent as a `[Viewer: tile … is open]` prefix on the message |
+
+The response is `reply` and the `thread_id` that was used.
+
 **Frontend** (`app/main.py`)
 Left column renders the tile with ground truth in green and predictions in red over the RGB
 raster, plus the DuckDB metrics. Right column is the chat, which posts to the API rather than
-holding an agent in Streamlit session state.
+holding an agent in Streamlit session state. It sends one `thread_id` per browser session and
+the selected tile with every message; **New conversation** starts a fresh thread.
 
 ## Running it
 
@@ -217,6 +250,30 @@ limit. Running several suites back to back saturates the token-per-minute quota 
 calls are token-heavy — and `no_agent_error` currently counts a 429 as an agent failure, which
 it isn't. Retry with backoff is an open item.)
 
+### What it caught, again
+
+Adding conversation memory meant three rounds of prompt changes, and re-running the suite
+afterwards found three faults, none visible when trying the chat by hand. The numbers below
+are repeated local runs of single cases, not full LangSmith experiments.
+
+| Fault | Before the fix | After |
+| --- | --- | --- |
+| Same false-premise question as above: the answer led with image "issues" instead of the IoU | judge passed 3/5 (6/6 before the changes) | 6/6 |
+| A tile ID typed in the question lost to the tile open in the viewer | 5/8 | 8/8 |
+| With no tile anywhere, the agent looked up a tile called "X" | failed 1 run in 3 | 10/10 |
+
+The first was not caused by the supervisor prompt at all. The vision tool had been given a
+system prompt asking what in the image *"could explain its performance"*, so it listed
+problems even for a tile with an IoU of 0.98, and the supervisor passed them on: *"While the
+tile did not fail, the analysis revealed some issues with brightness and contrast…"* The
+false premise came from a tool, not the user. The vision prompt now says the tile may have
+scored well and to report a difficulty only when it is clearly present.
+
+The third was the system prompt's own example, `[Viewer: tile X is open]`. The model took the
+placeholder for a real tile ID.
+
+Six to ten runs per case shows the fixes work, not that the cases can never fail.
+
 ### Testing the tests
 
 The first full run scored 7/7, which proves nothing on its own: a suite that has never failed
@@ -226,6 +283,9 @@ fabricated score for a nonexistent tile, an unnecessary vision call — and asse
 those **0**. For the judge, the model call can't be tested deterministically, so the response
 parsing is split out and tested directly, including that an unreadable verdict abstains instead
 of passing.
+
+`tests/test_history.py` covers the history window the same way: no API key, hand-built
+conversations, and assertions that a tool result is never cut off from its call.
 
 ```bash
 pytest tests/ -q
@@ -240,9 +300,10 @@ hence testing the evaluators directly.)
 ```text
 data/                      TIFFs, ground truth zips, prediction zips, metrics.duckdb
 src/
-  api/server.py            FastAPI, holds one agent instance for the process
+  api/server.py            FastAPI, holds one agent instance and its conversation memory
   agent/
     graph_agent.py         LangGraph supervisor + the two tools
+    history.py             the window of recent turns sent to the LLM
     vision_tool.py         TIFF → resized JPEG → base64, and the vision call
     qa_agent.py            earlier single-agent version, unused
   metrics/
@@ -254,10 +315,11 @@ src/
 app/main.py                Streamlit dashboard and chat
 evals/
   dataset.py               eval cases, versioned in git
-  evaluators.py            five code scorers plus one LLM judge
+  evaluators.py            six code scorers plus one LLM judge
   run_evals.py             runs the agent against the dataset
 tests/
   test_evaluators.py       proves the scorers can actually fail
+  test_history.py          the history window never orphans a tool result
 ```
 
 ## Notes
@@ -272,8 +334,13 @@ tests/
   named after the tile. The pipeline handles both. It skips tiles it cannot read rather than
   recording them as IoU 0.0, because that is indistinguishable from a prediction that simply
   missed — an earlier version silently wrote three fabricated scores and trained on them.
-- SQL in the tools is built with f-strings on `tile_id`. Fine for a local single-user tool,
-  not fine if this is ever exposed.
+- Tile IDs reach the tools from the LLM. The SQL binds them as parameters, but
+  `run_vision_analysis` still builds a file path from one unchecked, and `selected_tile` is
+  put into the prompt as sent. Fine for a local single-user tool, not fine if this is ever
+  exposed.
+- Conversation memory is in-process and unbounded in storage: see
+  [Conversation memory](#pieces). A SQLite or Postgres checkpointer is the fix if it needs to
+  survive restarts or run on more than one worker.
 - `qa_agent.py`, `xai_engine.py`, `image_extractor.py`, and `spatial_calculator.py` are
   earlier or parallel implementations that nothing in the running app imports.
 - Pinned to the LangChain 0.2 line. `langchain-core` has to be `>=0.2.27` because every
