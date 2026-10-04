@@ -1,4 +1,5 @@
 import os
+import sys
 import glob
 import numpy as np
 import pandas as pd
@@ -6,7 +7,6 @@ import geopandas as gpd
 import rasterio
 from rasterio.enums import ColorInterp
 import duckdb
-import zipfile
 import xgboost as xgb
 import shap
 import warnings
@@ -18,6 +18,10 @@ warnings.filterwarnings('ignore')
 # --- Robust Dotenv Loading (must run before any traceable call) ---
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 load_dotenv(dotenv_path=os.path.join(ROOT_DIR, ".env"))
+
+# Run as a script, sys.path[0] is src/metrics, so the project root has to be added
+sys.path.insert(0, ROOT_DIR)
+from src.metrics.shapefiles import shapefile_uri  # noqa: E402
 
 # --- Directory Setup ---
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data'))
@@ -52,31 +56,6 @@ def get_image_metrics(tiff_path):
     except Exception as e:
         print(f"Error reading {tiff_path}: {e}")
         return None, None
-
-def shapefile_uri(zip_path):
-    """
-    Build a GeoPandas URI for the .shp inside a zipped shapefile.
-
-    Some exports put the files at the archive root, others wrap them in a folder named
-    after the tile. A bare zip:// URI only finds the former, so locate the .shp and
-    address it explicitly. Returns None if the archive holds no shapefile.
-    """
-    if not os.path.exists(zip_path):
-        return None
-
-    with zipfile.ZipFile(zip_path) as archive:
-        # __MACOSX holds resource-fork stubs that look like real entries but are not.
-        shps = [n for n in archive.namelist()
-                if n.lower().endswith('.shp') and not n.startswith('__MACOSX/')]
-
-    if not shps:
-        return None
-    if len(shps) > 1:
-        print(f"  -> Warning: {os.path.basename(zip_path)} holds {len(shps)} shapefiles, using {shps[0]}")
-
-    inner = shps[0]
-    return f"zip://{zip_path}" if '/' not in inner else f"zip://{zip_path}!{inner}"
-
 
 def get_spatial_metrics(gt_path, pred_path, tiff_path):
     """

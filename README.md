@@ -333,6 +333,7 @@ src/
     qa_agent.py            earlier single-agent version, unused
   metrics/
     pipeline.py            IoU → XGBoost → SHAP → DuckDB
+    shapefiles.py          finds the .shp inside a zipped export, for the pipeline and viewer
     visualizer.py          the matplotlib overlay Streamlit renders
     image_extractor.py     standalone image feature extraction
     spatial_calculator.py  standalone polygon error helpers
@@ -346,6 +347,7 @@ tests/
   test_evaluators.py       proves the scorers can actually fail
   test_history.py          the history window never orphans a tool result
   test_pipeline.py         padding and the alpha band stay out of the image metrics
+  test_shapefiles.py       zipped shapefiles are found at the root or in a folder
   test_verdict.py          the pass/fail cut-off and its scorer
 ```
 
@@ -365,7 +367,7 @@ tests/
   Re-run the pipeline after pulling this change; a database built before it holds the old
   values.
 - Zipped shapefiles come in two shapes: `.shp` at the archive root, or wrapped in a folder
-  named after the tile. The pipeline handles both. It skips tiles it cannot read rather than
+  named after the tile. The pipeline and the map viewer handle both, through the same helper. It skips tiles it cannot read rather than
   recording them as IoU 0.0, because that is indistinguishable from a prediction that simply
   missed — an earlier version silently wrote three fabricated scores and trained on them.
 - Tile IDs reach the tools from the LLM. The SQL binds them as parameters, but
