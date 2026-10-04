@@ -32,8 +32,9 @@ def get_duckdb_metrics(tile_id: str) -> str:
         return "Database not found."
         
     with duckdb.connect(DB_PATH) as conn:
-        query = f"SELECT * FROM tile_metrics WHERE tile_id = '{tile_id}'"
-        tile_data = conn.execute(query).df()
+        # tile_id comes from the LLM, so it is bound as a parameter, never formatted in
+        query = "SELECT * FROM tile_metrics WHERE tile_id = ?"
+        tile_data = conn.execute(query, [tile_id]).df()
     
     if tile_data.empty:
         return f"Tile {tile_id} not found in the database."

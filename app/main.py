@@ -68,8 +68,8 @@ with col1:
         if os.path.exists(db_path):
             try:
                 with duckdb.connect(db_path) as conn:
-                    query = f"SELECT iou, brightness, contrast FROM tile_metrics WHERE tile_id = '{selected_tile}'"
-                    df_metrics = conn.execute(query).df()
+                    query = "SELECT iou, brightness, contrast FROM tile_metrics WHERE tile_id = ?"
+                    df_metrics = conn.execute(query, [selected_tile]).df()
                     
                 if not df_metrics.empty:
                     m1, m2, m3 = st.columns(3)
