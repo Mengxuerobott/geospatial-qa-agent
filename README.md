@@ -258,8 +258,10 @@ Same answer afterwards:
 
 (The old-prompt run scored 1/**3** rather than 1/4 because one example hit an OpenAI rate
 limit. Running several suites back to back saturates the token-per-minute quota — the vision
-calls are token-heavy — and `no_agent_error` currently counts a 429 as an agent failure, which
-it isn't. Retry with backoff is an open item.)
+calls are token-heavy — and `no_agent_error` counted that 429 as an agent failure, which it
+isn't. The target now waits and retries a rate-limited example, up to three times over about
+two minutes, replaying the conversation on a fresh thread; the judges retry the same way. If
+it is still rate limited after that, `no_agent_error` abstains rather than scoring 0.)
 
 ### What it caught, again
 
@@ -348,6 +350,7 @@ evals/
   dataset.py               eval cases, versioned in git
   evaluators.py            six code scorers plus two LLM judges
   run_evals.py             runs the agent against the dataset
+  retry.py                 waits out OpenAI rate limits
 tests/
   test_evaluators.py       proves the scorers can actually fail
   test_history.py          the history window never orphans a tool result

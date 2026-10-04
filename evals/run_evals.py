@@ -15,6 +15,7 @@ example.
 import argparse
 import os
 import sys
+import time
 import uuid
 
 from dotenv import load_dotenv
@@ -29,6 +30,7 @@ load_dotenv(dotenv_path=os.path.join(ROOT_DIR, ".env"))
 
 from evals.dataset import DATASET_NAME  # noqa: E402
 from evals.evaluators import ALL_EVALUATORS  # noqa: E402
+from evals.retry import is_rate_limit, with_backoff  # noqa: E402
 from src.agent.graph_agent import create_graph_agent, with_viewer_context  # noqa: E402
 from src.agent.history import recent_turns  # noqa: E402
 
@@ -55,22 +57,32 @@ def _tiles_queried(messages) -> list[str]:
     return tiles
 
 
-def make_target(agent):
+def make_target(agent, sleep=time.sleep):
     """
     `agent` must have a checkpointer. Each example runs on its own thread: any "history"
     turns are replayed first, then the question. Only the final turn is reported, so a
     single-turn example is scored exactly as it was before conversations existed.
+
+    An example that hits an OpenAI rate limit is retried after a wait; see evals/retry.py.
     """
     def target(inputs: dict) -> dict:
-        config = {"configurable": {"thread_id": str(uuid.uuid4())}}
         turns = list(inputs.get("history") or []) + [inputs]
 
-        try:
+        def run_conversation():
+            # A new thread on every attempt: a turn that died on a rate limit may have left
+            # half of itself in the checkpoint, so a retry replays the conversation from
+            # the start rather than resuming it.
+            config = {"configurable": {"thread_id": str(uuid.uuid4())}}
             for turn in turns:
                 content = with_viewer_context(turn["question"], turn.get("selected_tile"))
                 state = agent.invoke({"messages": [HumanMessage(content=content)]}, config=config)
+            return state
+
+        try:
+            state = with_backoff(run_conversation, sleep=sleep)
         except Exception as exc:  # surfaced by the no_agent_error evaluator
-            return {"answer": "", "tools_used": [], "tool_tiles": [], "error": repr(exc)}
+            return {"answer": "", "tools_used": [], "tool_tiles": [], "error": repr(exc),
+                    "rate_limited": is_rate_limit(exc)}
 
         final_turn = recent_turns(state["messages"], max_turns=1)
         return {
