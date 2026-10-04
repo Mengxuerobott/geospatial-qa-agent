@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import geopandas as gpd
 import rasterio
+from rasterio.enums import ColorInterp
 import duckdb
 import zipfile
 import xgboost as xgb
@@ -26,12 +27,28 @@ PRED_DIR = os.path.join(BASE_DIR, 'predictions')
 DB_PATH = os.path.join(BASE_DIR, 'metrics.duckdb')
 
 def get_image_metrics(tiff_path):
+    """
+    Brightness (mean) and contrast (std) of the tile's valid colour pixels.
+
+    Drone tiles are irregular shapes padded out to a rectangle, with an alpha band marking
+    the padding. Averaging every band over every pixel measures how much padding a tile
+    has, not how bright the imagery is: the alpha band is 255 wherever there is data, and
+    the padding is black. So read the colour bands only and drop masked pixels.
+    """
     try:
         with rasterio.open(tiff_path) as src:
-            img = src.read()
-            brightness = np.mean(img)
-            contrast = np.std(img)
-            return brightness, contrast
+            colour_bands = [i for i, interp in enumerate(src.colorinterp, start=1)
+                            if interp != ColorInterp.alpha]
+            img = src.read(colour_bands)
+            # 0 where the alpha band, nodata value or internal mask marks a pixel invalid
+            valid = src.dataset_mask() > 0
+
+        if not valid.any():
+            print(f"Error reading {tiff_path}: no valid pixels")
+            return None, None
+
+        pixels = img[:, valid]
+        return float(pixels.mean()), float(pixels.std())
     except Exception as e:
         print(f"Error reading {tiff_path}: {e}")
         return None, None

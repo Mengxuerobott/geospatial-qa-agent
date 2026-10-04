@@ -29,7 +29,8 @@ The metrics in DuckDB are produced ahead of time by a separate batch pipeline
 Walks `data/tiffs/`, pairs each TIFF with its ground-truth and prediction shapefile zips, and
 computes:
 
-- brightness and contrast, straight from the raster bands
+- brightness and contrast: the mean and standard deviation of the tile's valid colour pixels,
+  with the alpha band and the no-data padding around the tile left out
 - IoU between ground truth and prediction, after reprojecting both to the raster's CRS
 
 The ground truth here is animal trails — LineStrings, which have no area, so IoU would always
@@ -320,16 +321,24 @@ evals/
 tests/
   test_evaluators.py       proves the scorers can actually fail
   test_history.py          the history window never orphans a tool result
+  test_pipeline.py         padding and the alpha band stay out of the image metrics
 ```
 
 ## Notes
 
 - **The meta-model trains on six tiles.** That is enough for the SHAP values to vary
-  meaningfully across tiles — IoU ranges from 0.51 to 0.98, the darkest tile is the worst
-  performer and carries the largest positive brightness attribution — but fifty trees on six
-  samples is memorisation, not generalisation. Treat the SHAP output as a demonstration of
-  the mechanism, not as a calibrated model. More tiles is the single biggest improvement
-  available.
+  meaningfully across tiles — IoU ranges from 0.51 to 0.98, and the three lowest-contrast
+  tiles are the three worst performers and carry the positive contrast attributions — but
+  fifty trees on six samples is memorisation, not generalisation. Treat the SHAP output as a
+  demonstration of the mechanism, not as a calibrated model. More tiles is the single biggest
+  improvement available.
+- **Brightness and contrast are computed on valid pixels only.** The tiles are irregular
+  shapes padded to a rectangle, with an alpha band. An earlier version averaged all four
+  bands over every pixel, so the numbers mostly measured how much padding a tile had: the
+  worst tile was 23% padding, looked the darkest, and got a large brightness attribution
+  that the image itself did not support. On valid pixels it is not the darkest tile at all.
+  Re-run the pipeline after pulling this change; a database built before it holds the old
+  values.
 - Zipped shapefiles come in two shapes: `.shp` at the archive root, or wrapped in a folder
   named after the tile. The pipeline handles both. It skips tiles it cannot read rather than
   recording them as IoU 0.0, because that is indistinguishable from a prediction that simply
