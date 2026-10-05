@@ -18,6 +18,7 @@ from shapely.ops import unary_union
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import src.metrics.pipeline as pipeline  # noqa: E402
 from src.metrics.pipeline import (  # noqa: E402
     agreement,
     get_cell_metrics,
@@ -79,6 +80,16 @@ def test_alpha_band_is_not_averaged_in(tmp_path):
     brightness, contrast = get_image_metrics(_write_tile(tmp_path / "t.tif", 40, padding_cols=0))
     assert brightness == pytest.approx(40)
     assert contrast == pytest.approx(0)
+
+
+def test_reading_in_blocks_gives_the_same_numbers(tmp_path, monkeypatch):
+    """The tile is read a block at a time; the totals must not depend on the block size."""
+    path = _write_tile(tmp_path / "t.tif", 100, padding_cols=7, spread=10)
+    whole = get_image_metrics(path)
+    monkeypatch.setattr(pipeline, "READ_BLOCK_PX", 16)
+    in_blocks = get_image_metrics(path)
+    assert in_blocks == pytest.approx(whole)
+    assert in_blocks == pytest.approx((100, 10))
 
 
 def test_tile_with_no_valid_pixels_is_rejected(tmp_path):

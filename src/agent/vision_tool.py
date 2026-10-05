@@ -2,6 +2,7 @@ import os
 import sys
 import base64
 import rasterio
+from rasterio.enums import Resampling
 from rasterio.windows import Window, from_bounds
 import cv2
 import numpy as np
@@ -40,15 +41,21 @@ def _read_bgr(tiff_path: str, max_size: int, bounds=None):
     coordinates in that image, for drawing on it.
     """
     with rasterio.open(tiff_path) as src:
-        # Read the first 3 bands (Assuming RGB)
-        # rasterio reads as (Channels, Height, Width)
-        if bounds is None:
-            window = Window(0, 0, src.width, src.height)
-            img_array = src.read([1, 2, 3])
-        else:
+        window = Window(0, 0, src.width, src.height)
+        if bounds is not None:
             window = from_bounds(*bounds, transform=src.transform).round_offsets().round_lengths()
             window = window.intersection(Window(0, 0, src.width, src.height))
-            img_array = src.read([1, 2, 3], window=window)
+
+        # Read at the size that will be sent. Reading every pixel of a 300 MB TIFF to
+        # shrink it afterwards took the memory of the whole tile for each question asked.
+        h, w = int(window.height), int(window.width)
+        scale = min(1.0, max_size / max(h, w))
+        out_h, out_w = max(1, int(h * scale)), max(1, int(w * scale))
+
+        # Read the first 3 bands (Assuming RGB)
+        # rasterio reads as (Channels, Height, Width)
+        img_array = src.read([1, 2, 3], window=window, out_shape=(3, out_h, out_w),
+                             resampling=Resampling.average)
         to_full_res = ~src.transform
 
     # Transpose to (Height, Width, Channels) for OpenCV
@@ -60,14 +67,6 @@ def _read_bgr(tiff_path: str, max_size: int, bounds=None):
 
     # Convert RGB to BGR for OpenCV encoding
     img_bgr = cv2.cvtColor(img_array, cv2.COLOR_RGB2BGR)
-
-    # Resize if the image is too large
-    scale = 1.0
-    h, w = img_bgr.shape[:2]
-    if max(h, w) > max_size:
-        scale = max_size / max(h, w)
-        new_w, new_h = int(w * scale), int(h * scale)
-        img_bgr = cv2.resize(img_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
 
     def to_pixel(x, y):
         col, row = to_full_res * (x, y)

@@ -38,6 +38,8 @@ DB_PATH = os.path.join(BASE_DIR, 'metrics.duckdb')
 # Each tile is analysed on a grid of square cells this many metres a side
 CELL_SIZE_M = 50.0
 MAX_CELL_READ_PX = 1024
+# The whole tile is read in square blocks this many pixels a side
+READ_BLOCK_PX = 2048
 # Cells with less imagery than this are mostly padding and are left out
 MIN_VALID_FRACTION = 0.05
 # A cell needs at least this much trail, ground truth and prediction together, to get an
@@ -63,16 +65,29 @@ def get_image_metrics(tiff_path):
         with rasterio.open(tiff_path) as src:
             colour_bands = [i for i, interp in enumerate(src.colorinterp, start=1)
                             if interp != ColorInterp.alpha]
-            img = src.read(colour_bands)
-            # 0 where the alpha band, nodata value or internal mask marks a pixel invalid
-            valid = src.dataset_mask() > 0
+            # The tile is read a block at a time and only running totals are kept, so a
+            # 300 MB TIFF does not have to fit in memory several times over
+            count, total, total_of_squares = 0, 0.0, 0.0
+            for top in range(0, src.height, READ_BLOCK_PX):
+                for left in range(0, src.width, READ_BLOCK_PX):
+                    window = Window(left, top, min(READ_BLOCK_PX, src.width - left),
+                                    min(READ_BLOCK_PX, src.height - top))
+                    # 0 where the alpha band, nodata value or internal mask marks a
+                    # pixel invalid
+                    valid = src.dataset_mask(window=window) > 0
+                    if not valid.any():
+                        continue
+                    pixels = src.read(colour_bands, window=window)[:, valid].astype(np.float64)
+                    count += pixels.size
+                    total += pixels.sum()
+                    total_of_squares += np.square(pixels).sum()
 
-        if not valid.any():
+        if count == 0:
             print(f"Error reading {tiff_path}: no valid pixels")
             return None, None
 
-        pixels = img[:, valid]
-        return float(pixels.mean()), float(pixels.std())
+        mean = total / count
+        return float(mean), float(np.sqrt(max(total_of_squares / count - mean ** 2, 0.0)))
     except Exception as e:
         print(f"Error reading {tiff_path}: {e}")
         return None, None

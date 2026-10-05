@@ -1,9 +1,14 @@
 import streamlit as st
+import io
 import os
 import sys
 import uuid
 import duckdb
 import requests
+import matplotlib
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 
 # Add the src folder to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -16,6 +21,27 @@ from src.agent.verdict import FAIL_IOU_THRESHOLD, MATCH_TOLERANCE_M
 # --- Page Config ---
 st.set_page_config(page_title="Geospatial QA Agent", layout="wide")
 st.title("🌍 Explainable AI: Geospatial QA Agent")
+
+def _modified(*paths) -> tuple:
+    """When each file last changed, so a cached map is redrawn after the data is updated."""
+    return tuple(os.path.getmtime(path) if os.path.exists(path) else None for path in paths)
+
+
+# Streamlit reruns this whole script on every chat message, for every person using it.
+# Without the cache each rerun reread the TIFF and redrew the map. The cache is shared
+# between sessions, so a tile one person has opened is ready for the next.
+@st.cache_data(show_spinner=False, max_entries=64)
+def render_map(tiff_path, gt_path, pred_path, tile_id, show_cells, modified, _cells=None) -> bytes:
+    """
+    The map as a PNG. show_cells and modified are only there to key the cache: _cells is
+    not hashed, and changes exactly when the database file or the checkbox does.
+    """
+    fig = plot_tile_results(tiff_path, gt_path, pred_path, tile_id, cells=_cells)
+    png = io.BytesIO()
+    fig.savefig(png, format="png", dpi=110, bbox_inches="tight")
+    plt.close(fig)
+    return png.getvalue()
+
 
 # One conversation per browser session; the API keys the agent's memory on this
 if "thread_id" not in st.session_state:
@@ -71,9 +97,9 @@ with col1:
 
         with st.spinner(f"Loading map for {selected_tile}..."):
             try:
-                fig = plot_tile_results(tiff_path, gt_path, pred_path, selected_tile,
-                                        cells=cells if show_cells else None)
-                st.pyplot(fig)
+                st.image(render_map(tiff_path, gt_path, pred_path, selected_tile, show_cells,
+                                    _modified(tiff_path, gt_path, pred_path, db_path),
+                                    _cells=cells if show_cells else None))
             except Exception as e:
                 st.error(f"Could not load map: {e}")
 

@@ -1,6 +1,7 @@
 import os
+import numpy as np
 import rasterio
-from rasterio.plot import show
+from rasterio.enums import Resampling
 import matplotlib.pyplot as plt
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LinearSegmentedColormap, Normalize
@@ -18,6 +19,8 @@ ERROR_CMAP = LinearSegmentedColormap.from_list(
     "cell_error", ["#cde2fb", "#6da7ec", "#256abf", "#0d366b"])
 # Past this many, naming every failing cell hides the map; the worst are named
 MAX_CELL_LABELS = 20
+# The base image is read at no more than this many pixels on its long edge
+MAX_MAP_PX = 2000
 
 
 def _draw_cells(ax, cells):
@@ -68,13 +71,24 @@ def plot_tile_results(tiff_path: str, gt_path: str, pred_path: str, tile_id: str
     # 1. Plot the Base TIFF Image
     if os.path.exists(tiff_path):
         with rasterio.open(tiff_path) as src:
-            # rasterio.plot.show automatically handles the RGB rendering
-            show(src, ax=ax, title=f"Tile Analysis: {tile_id}")
-            # FIX: Lock the camera to the TIFF extent ---
+            # Read at about the size the map is drawn at. The figure is some 1000 pixels
+            # across; reading every pixel of a 300 MB TIFF for it is memory and time
+            # spent on detail that is thrown away.
+            scale = min(1.0, MAX_MAP_PX / max(src.height, src.width))
+            shape = (max(1, int(src.height * scale)), max(1, int(src.width * scale)))
+            bands = [1, 2, 3] if src.count >= 3 else [1]
+            img = src.read(bands, out_shape=(len(bands), *shape), resampling=Resampling.average)
             left, bottom, right, top = src.bounds
-            ax.set_xlim(left, right)
-            ax.set_ylim(bottom, top)
             tiff_crs = src.crs
+
+        # 8-bit imagery is shown as it is; anything deeper is stretched to its own range
+        full_scale = 255.0 if img.dtype == np.uint8 else float(max(img.max(), 1))
+        img = np.transpose(img, (1, 2, 0)).astype(np.float32) / full_scale
+        ax.imshow(img.squeeze(), extent=(left, right, bottom, top), cmap="gray", vmin=0, vmax=1)
+        ax.set_title(f"Tile Analysis: {tile_id}", fontweight="bold")
+        # FIX: Lock the camera to the TIFF extent ---
+        ax.set_xlim(left, right)
+        ax.set_ylim(bottom, top)
     else:
         ax.set_title(f"TIFF Image not found for {tile_id}")
         ax.text(0.5, 0.5, 'Image Missing', horizontalalignment='center', verticalalignment='center')

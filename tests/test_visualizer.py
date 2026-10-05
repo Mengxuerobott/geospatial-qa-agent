@@ -11,12 +11,16 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
+import rasterio  # noqa: E402
 from matplotlib.patches import Rectangle  # noqa: E402
+from rasterio.transform import from_origin  # noqa: E402
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import src.metrics.visualizer as visualizer  # noqa: E402
 from src.metrics.visualizer import MAX_CELL_LABELS, _draw_cells, plot_tile_results  # noqa: E402
 
 
@@ -86,4 +90,53 @@ def test_cells_add_a_scale_and_a_legend_entry(tmp_path):
     assert len(fig.axes) == 2
     labels = [t.get_text() for t in fig.axes[0].get_legend().get_texts()]
     assert len(labels) == 3 and "below the pass threshold" in labels[2]
+    plt.close(fig)
+
+
+def _write_tile(path, size=200, dtype="uint8", value=200) -> str:
+    """A square tile, 1 m a pixel, red on its left half and blue on its right."""
+    rgb = np.zeros((3, size, size), dtype=dtype)
+    rgb[0, :, : size // 2] = value
+    rgb[2, :, size // 2:] = value
+    with rasterio.open(path, "w", driver="GTiff", height=size, width=size, count=3,
+                       dtype=dtype, crs="EPSG:32612",
+                       transform=from_origin(1000, 5000, 1, 1)) as dst:
+        dst.write(rgb)
+    return str(path)
+
+
+def _base_image(fig):
+    return fig.axes[0].images[0]
+
+
+def test_the_map_is_read_no_larger_than_it_is_drawn(tmp_path, monkeypatch):
+    """The bug this exists for: every pixel of a 300 MB TIFF was read to draw a 1000 px map."""
+    monkeypatch.setattr(visualizer, "MAX_MAP_PX", 50)
+    fig = plot_tile_results(_write_tile(tmp_path / "t.tif"), "none.zip", "none.zip", "t")
+    assert _base_image(fig).get_array().shape[:2] == (50, 50)
+    plt.close(fig)
+
+
+def test_a_small_tile_is_not_enlarged(tmp_path):
+    fig = plot_tile_results(_write_tile(tmp_path / "t.tif"), "none.zip", "none.zip", "t")
+    assert _base_image(fig).get_array().shape[:2] == (200, 200)
+    plt.close(fig)
+
+
+def test_the_shrunk_image_still_sits_on_the_tile_s_map_extent(tmp_path, monkeypatch):
+    """Cells and trails are drawn in map coordinates, so the image must be too."""
+    monkeypatch.setattr(visualizer, "MAX_MAP_PX", 50)
+    fig = plot_tile_results(_write_tile(tmp_path / "t.tif"), "none.zip", "none.zip", "t")
+    image = _base_image(fig)
+    assert tuple(image.get_extent()) == (1000, 1200, 4800, 5000)
+    left_half, right_half = image.get_array()[25, 10], image.get_array()[25, 40]
+    assert left_half[0] > 0.7 and left_half[2] < 0.1      # red in the west
+    assert right_half[2] > 0.7 and right_half[0] < 0.1    # blue in the east
+    plt.close(fig)
+
+
+def test_sixteen_bit_imagery_is_stretched_into_view(tmp_path):
+    path = _write_tile(tmp_path / "t.tif", dtype="uint16", value=4000)
+    fig = plot_tile_results(path, "none.zip", "none.zip", "t")
+    assert _base_image(fig).get_array().max() == pytest.approx(1.0)
     plt.close(fig)
