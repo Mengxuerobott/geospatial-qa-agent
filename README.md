@@ -230,9 +230,10 @@ The viewer draws the cells over the map; see [The frontend](#the-frontend-appmai
 
 ### The vision tool (`src/agent/vision_tool.py`)
 
-Drone TIFFs are too large to send to an LLM. The tool reads the first three bands,
-normalises 16-bit to 8-bit if needed, downscales the long edge to 1024 px, JPEG-encodes the
-result in memory and base64s it. Nothing is written to disk.
+Drone TIFFs are too large to send to an LLM. The tool reads the first three bands at no
+more than 1024 px on the long edge, normalises 16-bit to 8-bit if needed, JPEG-encodes the
+result in memory and base64s it. The full-resolution image is never held in memory, and
+nothing is written to disk.
 
 The image goes to the vision model with a system prompt saying what it is (a drone tile run
 through an animal-trail segmentation model) and asking what is visible. The prompt does not
@@ -310,6 +311,12 @@ type *"look at r1c5"* in the chat. Cells with no trail in them were never scored
 left clear. When more than 20 cells fail, all are outlined and the worst 20 are named. The right column is the chat, which posts to the API. It
 sends one `thread_id` per browser session and the selected tile with every message; **New
 conversation** starts a fresh thread.
+
+The map is drawn once per tile and cached as a PNG, shared between everyone using the
+viewer. Streamlit reruns the whole page on every chat message, so without the cache each
+message reread the TIFF and redrew the map. The cache is keyed on when the TIFF, the
+shapefiles and the database last changed, so the map is redrawn after the data is updated.
+The base image is read at no more than 2000 px on its long edge, not at full resolution.
 
 ### The review list (`src/metrics/review.py`)
 
