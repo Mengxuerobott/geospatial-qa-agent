@@ -236,15 +236,21 @@ Everything is written to `data/metrics.duckdb`, in two tables:
 
 `get_duckdb_metrics` reads both. Its reply is the tile's IoU, verdict and SHAP values, the
 three trail lengths, and then the tile's weak areas: how many cells scored below the
-threshold, which part of the tile they are in, and the worst five by name, for example:
+threshold, which part of the tile they are in, and the five with the most trail in dispute
+by name, for example:
 
 ```text
 Trail lengths (lines within 5 m count as the same trail): 1840 m matched, 96 m annotated
 but not predicted, 22 m predicted but not annotated.
 Weak areas: 3 of 40 grid cells with trail in them scored below the threshold (3 in the
-north-east). Worst first: cell r1c6 (north-east): 51 m of annotated trail with no
+north-east). Most trail in dispute first: cell r1c6 (north-east): 51 m of annotated trail with no
 prediction near it, main driver shadow_fraction (0.82); ...
 ```
+
+Cells are listed by how many metres of trail are in dispute, most first, not by score: a
+cell with 6 m of trail and none of it matched scores 0, but a cell with 60 m unmatched out
+of 100 is the one worth checking first. The map labels and the review list use the same
+order.
 
 A cell is named by its row from the top and its column from the left. Cell scores are given
 as percentages and never called an IoU, so neither the LLM nor the `iou_grounded` scorer can
@@ -281,11 +287,15 @@ image and answer one of three things: a trail is visible there, no trail is visi
 although the ground is clear, or it cannot tell. It is told that "cannot tell" is the right
 answer when unsure, and that neither the annotator nor the model is assumed to be right.
 
+The reply may run to 1000 tokens for a cell, against 500 for a whole tile. If it is still
+cut off at the limit, a note saying so is added, so the agent does not report the places it
+got to as if they were all there are.
+
 A small vision model reading a thin trail from above will sometimes be wrong. The agent is
 told to pass its answer on as what the image appears to show and as a place for a person to
 check, not as settled.
 
-The agent is also told to look at the worst one or two cells, since each call now sends two
+The agent is also told to look at the first one or two cells listed, since each call now sends two
 images, and never to pass a cell name the metrics tool did not give it. A name that is not
 shaped like `r1c5` is refused before it reaches the database. If the shapefiles cannot be
 read, or the cell has no trail in it, the crop is sent once without lines.
@@ -341,7 +351,8 @@ annotated: the darker the cell, the more they disagree.
 Cells below the pass threshold are also outlined in white and labelled with their name, so
 a failure is never marked by shade alone. The name is the one the agent uses, so you can
 type *"look at r1c5"* in the chat. Cells with no trail in them were never scored and are
-left clear. When more than 20 cells fail, all are outlined and the worst 20 are named. The right column is the chat, which posts to the API. It
+left clear. When more than 20 cells fail, all are outlined and the 20 with the most trail in
+dispute are named. The right column is the chat, which posts to the API. It
 sends one `thread_id` per browser session and the selected tile with every message; **New
 conversation** starts a fresh thread. A question that gets no answer within five minutes is
 given up on with a message, so a stuck call cannot freeze the chat.
