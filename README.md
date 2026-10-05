@@ -186,7 +186,7 @@ as percentages and never called an IoU, so neither the LLM nor the `iou_grounded
 mistake one for the tile's IoU. Weak areas never change the verdict: a tile that passed
 with weak areas still passed, and the agent reports them after the verdict.
 
-The viewer does not draw the cells yet.
+The viewer draws the cells over the map; see [The frontend](#the-frontend-appmainpy).
 
 ### The vision tool (`src/agent/vision_tool.py`)
 
@@ -242,8 +242,15 @@ look like a tile ID gets a 422. `GET /` is a health check.
 
 ### The frontend (`app/main.py`)
 
-The left column draws the tile with ground truth in green and predictions in red over the
-RGB raster, plus the DuckDB metrics. The right column is the chat, which posts to the API. It
+The left column draws the whole tile with ground truth in green and predictions in red over
+the RGB raster, plus the DuckDB metrics, including how many cells failed.
+
+With **Show where the model did badly** ticked, each scored grid cell is shaded blue by how
+much of its trail the model missed or wrongly predicted: the darker the cell, the worse.
+Cells below the pass threshold are also outlined in white and labelled with their name, so
+a failure is never marked by shade alone. The name is the one the agent uses, so you can
+type *"look at r1c5"* in the chat. Cells with no trail in them were never scored and are
+left clear. When more than 20 cells fail, all are outlined and the worst 20 are named. The right column is the chat, which posts to the API. It
 sends one `thread_id` per browser session and the selected tile with every message; **New
 conversation** starts a fresh thread.
 
@@ -394,7 +401,7 @@ src/
   metrics/
     pipeline.py            per-tile and per-cell metrics → XGBoost → SHAP → DuckDB
     shapefiles.py          finds the .shp inside a zipped export, for the pipeline and viewer
-    visualizer.py          the matplotlib overlay Streamlit renders
+    visualizer.py          the matplotlib map Streamlit renders: trails and shaded cells
     image_extractor.py     standalone image feature extraction, unused
     spatial_calculator.py  standalone polygon error helpers, unused
   xai_engine.py            QATriageEngine, a classifier variant, unused
@@ -414,6 +421,7 @@ tests/
   test_tiles.py            paths and sentences are not tile IDs
   test_vision_crop.py      a cell is cut from the right place and keeps its detail
   test_verdict.py          the pass/fail cut-off and its scorer
+  test_visualizer.py       failing cells are shaded, outlined and named on the map
 ```
 
 ## Limitations
