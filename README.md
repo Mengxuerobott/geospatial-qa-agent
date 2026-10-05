@@ -29,6 +29,21 @@ Streamlit UI  ──HTTP──>  FastAPI  ──>  LangGraph ReAct agent (gpt-4o
 The metrics in DuckDB are produced ahead of time by a batch pipeline
 (`src/metrics/pipeline.py`). The agent only reads them.
 
+## Who does what
+
+The tool has one maintainer and any number of readers.
+
+- **The maintainer** puts the TIFFs, ground truth and predictions under `data/`, runs the
+  pipeline to train the model and build the database, and exports the review list.
+- **Everyone else** uses the viewer and the chat to look at where prediction and annotation
+  disagree. Nothing they can do changes the data.
+
+The code keeps to that split. The viewer and the API open the database read-only, so
+several people can ask at once. The pipeline builds a new database file and swaps it into
+place in one step, so it can be rebuilt while people are using the tool: they get the whole
+old database or the whole new one. Under Docker, `data/` is mounted read-only into both
+services, and the pipeline is run from the host.
+
 ## Quick start
 
 You need Python and an OpenAI API key.
@@ -98,8 +113,8 @@ Compose points Streamlit at `http://api:8000/chat` through `API_URL`; run locall
 back to `http://localhost:8000/chat`.
 
 `.dockerignore` keeps `.env` and `data/` out of the images. The `api` service reads its keys
-at run time through `env_file`, and both services get the data through the `./data` volume
-mount. Images built before `.dockerignore` existed contain your `.env`: rebuild them, and
+at run time through `env_file`, and both services get the data through the `./data` volume,
+mounted read-only. Run the pipeline on the host, not in a container. Images built before `.dockerignore` existed contain your `.env`: rebuild them, and
 rotate the keys if those images were ever pushed anywhere.
 
 ### On Windows
@@ -484,6 +499,7 @@ evals/
   retry.py                 waits out OpenAI rate limits
 tests/
   test_cells.py            weak areas are counted, located and never called an IoU
+  test_database.py         several people can read while the database is rebuilt
   test_evaluators.py       proves the scorers can fail
   test_history.py          the history window never orphans a tool result
   test_pipeline.py         image metrics ignore padding; cells are scored and placed correctly
