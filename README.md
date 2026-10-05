@@ -1,6 +1,7 @@
 # Geospatial QA Agent
 
-A chat interface for working out why a segmentation model did badly on a drone image tile.
+A chat interface for working out where a segmentation model's predictions on a drone image
+tile disagree with the annotated ground truth, and why.
 
 It is a single LangGraph ReAct agent with two tools:
 
@@ -135,11 +136,33 @@ shapefile zips. It measures every tile twice: once whole, and once on a grid of 
 **Per tile**, it computes the IoU between ground truth and prediction, after reprojecting
 both to the raster's CRS. This is the number the pass/fail verdict uses.
 
-The ground truth is animal trails, which are LineStrings. Lines have no area, so their IoU
-would always be zero. The pipeline buffers line geometry by 5 metres and measures overlap on
-the resulting polygons. Polygons pass through unbuffered.
+#### How the IoU is measured
 
-**Per cell**, it computes the IoU inside the cell and five image attributes, all on valid
+The ground truth is animal trails drawn as lines by a human annotator. The lines sit near
+the real trail, not exactly on it, and that is acceptable: a line a few metres to one side
+still stands for that trail. So the prediction is not scored by how closely it overlaps the
+annotation. Two lines within 5 metres of each other (`MATCH_TOLERANCE_M` in
+`src/agent/verdict.py`) count as the same trail, and the trail is sorted into three lengths:
+
+| Length | Meaning |
+| --- | --- |
+| **Matched** | Annotated trail with a prediction within 5 m of it |
+| **Annotated, not predicted** | Annotated trail with no prediction within 5 m |
+| **Predicted, not annotated** | Predicted trail with no annotation within 5 m |
+
+The IoU is the matched length divided by the sum of all three. A prediction running
+alongside the annotation 3 m away scores 1.0. An earlier version widened both lines by 5 m
+and measured the overlap of the two bands, which scored that same prediction 0.54, a fail,
+and dropped below 0.75 for any offset over about 1.4 m.
+
+A prediction further than 5 m from the annotation counts twice, once as annotated trail
+that was not predicted and once as predicted trail that was not annotated.
+
+The two unmatched lengths are disagreements, not errors. The annotation can be the one that
+is wrong, so the tool output and the agent say "annotated but not predicted", not "missed".
+Polygon layers are compared by plain area overlap, with no tolerance.
+
+**Per cell**, it computes the same IoU inside the cell and five image attributes, all on valid
 pixels only (the alpha band and the no-data padding are left out):
 
 | Attribute | What it measures |
@@ -154,11 +177,11 @@ The cells are windows read out of the TIFF; the image is never cut up. Each cell
 row, column and map bounds, so it can be drawn back onto the whole tile. Three rules keep
 the cell scores honest:
 
-- Trails are buffered on the whole tile and clipped to the cell afterwards, so a trail near
-  a cell edge is shared between the cells on both sides.
-- A cell with no trail in either layer gets no IoU and is not trained on. There is nothing
-  in it to get right or wrong.
-- A cell with trail in one layer only is a miss or a false positive, and scores 0.
+- Trails are matched on the whole tile and clipped to the cell afterwards, so a prediction
+  just across a cell boundary still matches the annotation on this side.
+- A cell with less than 5 m of trail, both layers together, gets no IoU and is not trained
+  on. There is nothing in it to agree or disagree about.
+- A cell with trail in one layer only is a full disagreement, and scores 0.
 
 The pipeline then fits one XGBoost regressor across the cells of every tile, predicting
 error (`1 - IoU`) from the five attributes, and runs SHAP over it. The SHAP values let the
@@ -168,17 +191,19 @@ Everything is written to `data/metrics.duckdb`, in two tables:
 
 | Table | One row per | Holds |
 | --- | --- | --- |
-| `tile_metrics` | tile | whole-tile IoU, brightness and contrast, how many cells were scored and how many failed, and the mean SHAP value of its cells for each attribute |
-| `cell_metrics` | grid cell | position and map bounds, the five attributes, the cell's IoU, and its own SHAP values |
+| `tile_metrics` | tile | whole-tile IoU and its three lengths, brightness and contrast, how many cells were scored and how many failed, and the mean SHAP value of its cells for each attribute |
+| `cell_metrics` | grid cell | position and map bounds, the five attributes, the cell's IoU and its three lengths, and its own SHAP values |
 
-`get_duckdb_metrics` reads both. Its reply is the tile's IoU, verdict and SHAP values,
-followed by the tile's weak areas: how many cells scored below the threshold, which part of
-the tile they are in, and the worst five by name, for example:
+`get_duckdb_metrics` reads both. Its reply is the tile's IoU, verdict and SHAP values, the
+three trail lengths, and then the tile's weak areas: how many cells scored below the
+threshold, which part of the tile they are in, and the worst five by name, for example:
 
 ```text
+Trail lengths (lines within 5 m count as the same trail): 1840 m matched, 96 m annotated
+but not predicted, 22 m predicted but not annotated.
 Weak areas: 3 of 40 grid cells with trail in them scored below the threshold (3 in the
-north-east). Worst first: cell r1c6 (north-east): trail missed entirely, main driver
-shadow_fraction (0.82); ...
+north-east). Worst first: cell r1c6 (north-east): 51 m of annotated trail with no
+prediction near it, main driver shadow_fraction (0.82); ...
 ```
 
 A cell is named by its row from the top and its column from the left. Cell scores are given
@@ -245,8 +270,9 @@ look like a tile ID gets a 422. `GET /` is a health check.
 The left column draws the whole tile with ground truth in green and predictions in red over
 the RGB raster, plus the DuckDB metrics, including how many cells failed.
 
-With **Show where the model did badly** ticked, each scored grid cell is shaded blue by how
-much of its trail the model missed or wrongly predicted: the darker the cell, the worse.
+With **Show where prediction and annotation disagree** ticked, each scored grid cell is
+shaded blue by how much of its trail is annotated but not predicted, or predicted but not
+annotated: the darker the cell, the more they disagree.
 Cells below the pass threshold are also outlined in white and labelled with their name, so
 a failure is never marked by shade alone. The name is the one the agent uses, so you can
 type *"look at r1c5"* in the chat. Cells with no trail in them were never scored and are
@@ -393,7 +419,7 @@ src/
   agent/
     graph_agent.py         the LangGraph ReAct agent and its two tools
     history.py             the window of recent turns sent to the LLM
-    verdict.py             the IoU threshold below which a tile fails
+    verdict.py             the match tolerance and the IoU threshold below which a tile fails
     cells.py               describes a tile's weak areas from its grid cells
     tiles.py               what a tile ID may look like
     vision_tool.py         TIFF → resized JPEG → base64, and the vision call
@@ -434,8 +460,8 @@ tests/
   dark one, so SHAP may credit `brightness` for what `shadow_fraction` describes, or the
   reverse.
 - **Rebuild the database after pulling a pipeline change.** A database built before the
-  per-cell metrics has no `cell_metrics` table, and its SHAP values came from a model
-  trained on whole tiles. The eval reference values are read from the database, so push
+  5 m tolerance holds the stricter overlap IoU, so its scores are lower and some of its
+  verdicts differ. One built before the per-cell metrics has no `cell_metrics` table. The eval reference values are read from the database, so push
   the dataset again afterwards (`python evals/dataset.py`).
 - **Unreadable tiles are skipped, not scored 0.** An IoU of 0.0 cannot be told apart from a
   prediction that missed. Zipped shapefiles are read whether the `.shp` is at the archive
