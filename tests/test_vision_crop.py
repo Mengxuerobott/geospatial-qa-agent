@@ -16,9 +16,6 @@ import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import LineString
 
-# vision_tool refuses to import without a key. Nothing here calls the API.
-os.environ.setdefault("OPENAI_API_KEY", "not-a-real-key")
-os.environ["LANGCHAIN_TRACING_V2"] = "false"
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.agent.cells import parse_cell_name  # noqa: E402

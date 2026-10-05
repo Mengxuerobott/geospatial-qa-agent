@@ -13,10 +13,6 @@ import duckdb
 import pandas as pd
 import pytest
 
-# graph_agent imports the vision tool, which refuses to import without a key.
-# Nothing here calls the API.
-os.environ.setdefault("OPENAI_API_KEY", "not-a-real-key")
-os.environ["LANGCHAIN_TRACING_V2"] = "false"
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import src.agent.graph_agent as graph_agent  # noqa: E402

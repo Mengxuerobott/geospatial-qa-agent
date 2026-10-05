@@ -1,0 +1,9 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# So `pytest` finds the src and evals packages from any directory
+pythonpath = ["."]
+filterwarnings = [
+    # Raised inside rasterio, shap and matplotlib about their own future changes
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
