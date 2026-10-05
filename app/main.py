@@ -10,6 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # The agent itself runs behind the FastAPI backend; this app only talks to it over HTTP
 from src.metrics.visualizer import plot_tile_results
+from src.metrics.review import load_review_list
 from src.agent.verdict import FAIL_IOU_THRESHOLD, MATCH_TOLERANCE_M
 
 # --- Page Config ---
@@ -100,6 +101,28 @@ with col1:
                     st.info("No metrics found in database for this tile. Did you run the pipeline?")
             except Exception as e:
                 st.error(f"Database error: {e}")
+
+            # --- REVIEW LIST ---
+            # The cells below the pass threshold as map features, for checking against
+            # the imagery in QGIS or ArcGIS. Hidden when the database cannot supply it.
+            if has_cells:
+                try:
+                    this_tile = load_review_list(db_path, selected_tile)
+                    every_tile = load_review_list(db_path)
+                except Exception:
+                    this_tile = every_tile = None
+                if every_tile is not None:
+                    st.caption("Review list: the cells where prediction and annotation "
+                               "disagree, as GeoJSON for QGIS or ArcGIS.")
+                    d1, d2 = st.columns(2)
+                    d1.download_button(
+                        f"This tile ({len(this_tile)} cells)", this_tile.to_json(),
+                        file_name=f"{selected_tile}-disagreements.geojson",
+                        mime="application/geo+json", disabled=this_tile.empty)
+                    d2.download_button(
+                        f"All tiles ({len(every_tile)} cells)", every_tile.to_json(),
+                        file_name="disagreements.geojson",
+                        mime="application/geo+json", disabled=every_tile.empty)
         else:
             st.warning("Database not found. Run pipeline.py first.")
 

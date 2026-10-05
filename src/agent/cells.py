@@ -44,7 +44,7 @@ def compass(cell, extent) -> str:
     return name or "centre"
 
 
-def _what_went_wrong(cell) -> str:
+def how_they_disagree(cell) -> str:
     """
     How the prediction and the annotation disagree in a cell, without saying which is
     right: the annotation is a person's work and can be the one that is wrong.
@@ -61,16 +61,28 @@ def _what_went_wrong(cell) -> str:
     return f"{cell['iou']:.0%} of the trail matched, {disagreements}"
 
 
-def _main_driver(cell) -> str:
-    """The attribute SHAP holds most responsible for this cell's error, with its value."""
+def main_driver(cell):
+    """
+    The attribute SHAP holds most responsible for this cell's error, or None when no
+    attribute pushed the error up.
+    """
     shap = {column[len("shap_"):]: cell[column] for column in cell.index
             if column.startswith("shap_") and pd.notna(cell[column])}
     if not shap:
-        return ""
+        return None
     feature = max(shap, key=shap.get)
-    if shap[feature] <= 0:
-        return ""
-    return f", main driver {feature} ({cell[feature]:.2f})"
+    return feature if shap[feature] > 0 else None
+
+
+def weak_cells(cells: pd.DataFrame) -> pd.DataFrame:
+    """
+    The cells of one tile that scored below the pass threshold, worst first, with a
+    'where' column saying which part of the tile each is in.
+    """
+    weak = cells[cells["iou"].notna() & (cells["iou"] < FAIL_IOU_THRESHOLD)].sort_values(
+        ["iou", "cell_row", "cell_col"])
+    extent = (cells["minx"].min(), cells["miny"].min(), cells["maxx"].max(), cells["maxy"].max())
+    return weak.assign(where=[compass(cell, extent) for _, cell in weak.iterrows()])
 
 
 def describe_weak_cells(cells: pd.DataFrame) -> str:
@@ -85,22 +97,22 @@ def describe_weak_cells(cells: pd.DataFrame) -> str:
     if scored.empty:
         return "Weak areas: unknown; no grid cell of this tile holds enough trail to score."
 
-    weak = scored[scored["iou"] < FAIL_IOU_THRESHOLD].sort_values(
-        ["iou", "cell_row", "cell_col"])
+    weak = weak_cells(cells)
     if weak.empty:
         return (f"Weak areas: none; all {len(scored)} grid cells with trail in them "
                 "scored above the threshold.")
 
-    extent = (cells["minx"].min(), cells["miny"].min(), cells["maxx"].max(), cells["maxy"].max())
-    weak = weak.assign(where=[compass(cell, extent) for _, cell in weak.iterrows()])
-
     regions = weak["where"].value_counts()
     spread = ", ".join(f"{count} in the {region}" for region, count in regions.items())
+
+    def driver(cell):
+        feature = main_driver(cell)
+        return f", main driver {feature} ({cell[feature]:.2f})" if feature else ""
 
     listed = weak.head(MAX_CELLS_LISTED)
     details = "; ".join(
         f"cell {cell_name(cell['cell_row'], cell['cell_col'])} ({cell['where']}): "
-        f"{_what_went_wrong(cell)}{_main_driver(cell)}"
+        f"{how_they_disagree(cell)}{driver(cell)}"
         for _, cell in listed.iterrows()
     )
     more = f"; and {len(weak) - len(listed)} more" if len(weak) > len(listed) else ""

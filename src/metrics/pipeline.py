@@ -337,8 +337,11 @@ def run_pipeline():
         # cells, which would let cells holding a stub of trail outweigh the rest. A tile
         # with no trail in either layer scores 0.0, as it always has.
         iou, matched, annotated_only, predicted_only = agreement(parts)
+        with rasterio.open(tiff_path) as src:
+            # Cell bounds are in this CRS; the review list needs it to place them on a map
+            crs = src.crs.to_string() if src.crs else None
         tile_rows.append({
-            'tile_id': tile_id, 'brightness': brightness, 'contrast': contrast,
+            'tile_id': tile_id, 'crs': crs, 'brightness': brightness, 'contrast': contrast,
             'iou': iou if iou is not None else 0.0, 'matched': matched,
             'annotated_only': annotated_only, 'predicted_only': predicted_only,
         })
