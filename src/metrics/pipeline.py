@@ -7,7 +7,7 @@ import geopandas as gpd
 import rasterio
 from rasterio.enums import ColorInterp
 from rasterio.windows import Window, bounds as window_bounds
-from shapely.geometry import box
+from shapely.geometry import GeometryCollection, box
 import duckdb
 import xgboost as xgb
 import shap
@@ -24,7 +24,7 @@ load_dotenv(dotenv_path=os.path.join(ROOT_DIR, ".env"))
 # Run as a script, sys.path[0] is src/metrics, so the project root has to be added
 sys.path.insert(0, ROOT_DIR)
 from src.metrics.shapefiles import shapefile_uri  # noqa: E402
-from src.agent.verdict import FAIL_IOU_THRESHOLD  # noqa: E402
+from src.agent.verdict import FAIL_IOU_THRESHOLD, MATCH_TOLERANCE_M  # noqa: E402
 
 # --- Directory Setup ---
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'data'))
@@ -34,15 +34,15 @@ PRED_DIR = os.path.join(BASE_DIR, 'predictions')
 DB_PATH = os.path.join(BASE_DIR, 'metrics.duckdb')
 
 # --- Analysis Settings ---
-# Lines are buffered by this many metres either side so they have an area to overlap
-BUFFER_M = 5.0
 # Each tile is analysed on a grid of square cells this many metres a side
 CELL_SIZE_M = 50.0
 MAX_CELL_READ_PX = 1024
 # Cells with less imagery than this are mostly padding and are left out
 MIN_VALID_FRACTION = 0.05
-# A cell needs at least this much buffered trail (m^2), ground truth and prediction
-# together, to get an IoU. Below it the score is decided by a sliver at the cell's edge.
+# A cell needs at least this much trail, ground truth and prediction together, to get an
+# IoU: metres of line, or square metres when the layers are polygons. Below it the score
+# is decided by a stub at the cell's edge.
+MIN_SCORED_LENGTH = 5.0
 MIN_SCORED_AREA = 25.0
 # A pixel whose brightest band is under this share of full scale counts as shadow
 SHADOW_VALUE = 0.25
@@ -76,15 +76,14 @@ def get_image_metrics(tiff_path):
         print(f"Error reading {tiff_path}: {e}")
         return None, None
 
-def load_buffered_geometries(gt_path, pred_path, tiff_path):
+def load_geometries(gt_path, pred_path, tiff_path):
     """
-    Ground truth and prediction as one geometry each, in the raster's CRS, with lines
-    buffered into polygons.
+    Ground truth and prediction as one geometry each, in the raster's CRS. Either is None
+    when its file was read fine and holds nothing.
 
-    Returns None when the comparison cannot be made at all -- missing or unreadable
-    shapefiles, a CRS that will not project. That is deliberately distinct from an empty
-    geometry, which means the file was read fine and holds nothing. Collapsing the two hid
-    three unreadable archives behind a plausible-looking score.
+    Returns None, not a pair, when the comparison cannot be made at all -- missing or
+    unreadable shapefiles, a CRS that will not project. Collapsing that into an empty
+    geometry hid three unreadable archives behind a plausible-looking score.
     """
     try:
         gt_uri = shapefile_uri(gt_path)
@@ -108,12 +107,6 @@ def load_buffered_geometries(gt_path, pred_path, tiff_path):
                 continue
             if gdf.crs != tiff_crs:
                 gdf = gdf.to_crs(tiff_crs)
-            # Animal trails are lines, which have no area to overlap, so give them one.
-            # This runs on the whole tile, before any cell is cut out of it: buffering
-            # inside a cell would lose the part of a trail's buffer that belongs to the
-            # cell next door.
-            if gdf.geometry.geom_type.isin(['LineString', 'MultiLineString']).any():
-                gdf = gdf.assign(geometry=gdf.geometry.buffer(BUFFER_M))
             geoms.append(gdf.geometry.unary_union)
         return tuple(geoms)
     except Exception as e:
@@ -121,36 +114,55 @@ def load_buffered_geometries(gt_path, pred_path, tiff_path):
         return None
 
 
-def overlap_iou(gt_geom, pred_geom):
-    """IoU of two geometries. 0.0 when either is missing or they do not overlap."""
-    if not gt_geom or not pred_geom:
-        return 0.0
-    union = gt_geom.union(pred_geom).area
-    return gt_geom.intersection(pred_geom).area / union if union > 0 else 0.0
-
-
-def cell_iou(gt_geom, pred_geom, cell_box):
+def split_agreement(gt_geom, pred_geom, tolerance=MATCH_TOLERANCE_M):
     """
-    IoU inside one grid cell, or None when the cell has too little trail to score.
+    Sorts the trail into three geometries: matched, annotated only, predicted only.
 
-    A cell with no trail in either layer is not a perfect match and not a miss; there is
-    nothing in it to get right or wrong, so it stays out of the training data. A cell with
-    trail in one layer only is a real miss or a real false positive, and scores 0.0.
+    The annotation is a person's line near the trail, not on it, so the two are not
+    compared by how much they overlap: a prediction running alongside the annotation a few
+    metres away is the same trail. A stretch of annotated trail is matched when a
+    prediction lies within the tolerance of it, and annotated only when none does. A
+    stretch of prediction with no annotation within the tolerance is predicted only.
+
+    This is done on the whole tile, before any cell is cut out of it, so a prediction just
+    across a cell boundary still matches the annotation on this side.
+
+    Polygons are compared by plain overlap, with no tolerance. A line set against polygons
+    is widened by the tolerance first so that it has an area to overlap with.
     """
-    gt_part = gt_geom.intersection(cell_box) if gt_geom else None
-    pred_part = pred_geom.intersection(cell_box) if pred_geom else None
-    gt_area = gt_part.area if gt_part else 0.0
-    pred_area = pred_part.area if pred_part else 0.0
+    gt = gt_geom if gt_geom else GeometryCollection()
+    pred = pred_geom if pred_geom else GeometryCollection()
 
-    if gt_area and pred_area:
-        union = gt_part.union(pred_part).area
-    else:
-        union = gt_area + pred_area
-    if union < MIN_SCORED_AREA:
-        return None, gt_area, pred_area
+    if gt.area > 0 or pred.area > 0:
+        gt = gt if gt.area > 0 else gt.buffer(tolerance)
+        pred = pred if pred.area > 0 else pred.buffer(tolerance)
+        return gt.intersection(pred), gt.difference(pred), pred.difference(gt)
 
-    iou = gt_part.intersection(pred_part).area / union if gt_area and pred_area else 0.0
-    return iou, gt_area, pred_area
+    return (gt.intersection(pred.buffer(tolerance)),
+            gt.difference(pred.buffer(tolerance)),
+            pred.difference(gt.buffer(tolerance)))
+
+
+def agreement(parts, region=None):
+    """
+    (iou, matched, annotated_only, predicted_only) for the output of split_agreement,
+    over the whole tile or inside one region of it.
+
+    The three sizes are metres of trail, or square metres when the layers are polygons.
+    The IoU is the matched share of all three. It is None when the region holds too little
+    trail to score: with no trail in either layer there is nothing to agree or disagree
+    about, which is neither a perfect match nor a miss.
+    """
+    areal = any(part.area > 0 for part in parts)
+    if region is not None:
+        parts = [part.intersection(region) for part in parts]
+    matched, annotated_only, predicted_only = (
+        float(part.area if areal else part.length) for part in parts)
+
+    total = matched + annotated_only + predicted_only
+    if total < (MIN_SCORED_AREA if areal else MIN_SCORED_LENGTH):
+        return None, matched, annotated_only, predicted_only
+    return matched / total, matched, annotated_only, predicted_only
 
 
 def image_features(img, valid, scale):
@@ -197,10 +209,11 @@ def image_features(img, valid, scale):
     }
 
 
-def get_cell_metrics(tile_id, tiff_path, gt_geom, pred_geom, cell_size_m=CELL_SIZE_M):
+def get_cell_metrics(tile_id, tiff_path, parts, cell_size_m=CELL_SIZE_M):
     """
     One row per grid cell of the tile: where it is, what the imagery looks like there and
-    how well the prediction matched the ground truth inside it.
+    how well the prediction matched the ground truth inside it. parts is the tile's trail
+    as sorted by split_agreement.
 
     The cells are windows read out of the TIFF, which is never cut up; each row keeps its
     map bounds so a cell can be drawn back onto the whole tile. Cells that are almost all
@@ -229,14 +242,15 @@ def get_cell_metrics(tile_id, tiff_path, gt_geom, pred_geom, cell_size_m=CELL_SI
                 img = src.read(colour_bands, window=window,
                                out_shape=(len(colour_bands), *out_shape))
                 minx, miny, maxx, maxy = window_bounds(window, src.transform)
-                iou, gt_area, pred_area = cell_iou(gt_geom, pred_geom,
-                                                   box(minx, miny, maxx, maxy))
+                iou, matched, annotated_only, predicted_only = agreement(
+                    parts, box(minx, miny, maxx, maxy))
                 rows.append({
                     'tile_id': tile_id, 'cell_row': cell_row, 'cell_col': cell_col,
                     'minx': minx, 'miny': miny, 'maxx': maxx, 'maxy': maxy,
                     'valid_fraction': float(valid.mean()),
                     **image_features(img, valid, scale),
-                    'gt_area': gt_area, 'pred_area': pred_area, 'iou': iou,
+                    'matched': matched, 'annotated_only': annotated_only,
+                    'predicted_only': predicted_only, 'iou': iou,
                 })
     return rows
 
@@ -305,25 +319,28 @@ def run_pipeline():
         pred_path = os.path.join(PRED_DIR, f"{tile_id}.zip")
         
         brightness, contrast = get_image_metrics(tiff_path)
-        geometries = load_buffered_geometries(gt_path, pred_path, tiff_path)
+        geometries = load_geometries(gt_path, pred_path, tiff_path)
         
         if brightness is None or geometries is None:
             skipped.append(tile_id)
             continue
 
-        gt_geom, pred_geom = geometries
         try:
-            tile_cells = get_cell_metrics(tile_id, tiff_path, gt_geom, pred_geom)
+            parts = split_agreement(*geometries)
+            tile_cells = get_cell_metrics(tile_id, tiff_path, parts)
         except Exception as e:
             print(f"  -> Skipping: could not compute cell metrics: {e}")
             skipped.append(tile_id)
             continue
 
-        # The tile's own IoU is still measured on the whole tile. It is not an average of
-        # its cells, which would let cells holding a sliver of trail outweigh the rest.
+        # The tile's own IoU is measured on the whole tile. It is not an average of its
+        # cells, which would let cells holding a stub of trail outweigh the rest. A tile
+        # with no trail in either layer scores 0.0, as it always has.
+        iou, matched, annotated_only, predicted_only = agreement(parts)
         tile_rows.append({
-            'tile_id': tile_id, 'brightness': brightness,
-            'contrast': contrast, 'iou': overlap_iou(gt_geom, pred_geom)
+            'tile_id': tile_id, 'brightness': brightness, 'contrast': contrast,
+            'iou': iou if iou is not None else 0.0, 'matched': matched,
+            'annotated_only': annotated_only, 'predicted_only': predicted_only,
         })
         cell_rows.extend(tile_cells)
         print(f"  -> {len(tile_cells)} cells, "

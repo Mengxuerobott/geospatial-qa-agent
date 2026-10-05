@@ -14,18 +14,20 @@ import rasterio
 from rasterio.enums import ColorInterp
 from rasterio.transform import from_origin
 from shapely.geometry import LineString, box
+from shapely.ops import unary_union
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.metrics.pipeline import (  # noqa: E402
-    cell_iou,
+    agreement,
     get_cell_metrics,
     get_image_metrics,
     image_features,
-    overlap_iou,
+    split_agreement,
     summarise_tiles,
     train_and_explain,
 )
+from src.agent.verdict import MATCH_TOLERANCE_M  # noqa: E402
 
 SIZE = 40
 
@@ -143,41 +145,108 @@ def test_features_of_all_padding_are_none():
 CELL = box(0, 0, 50, 50)
 
 
+def _line(*points):
+    return LineString(points)
+
+
+def _score(gt, pred, region=None):
+    return agreement(split_agreement(gt, pred), region)
+
+
+def test_identical_lines_match_completely():
+    trail = _line((0, 10), (100, 10))
+    iou, matched, annotated_only, predicted_only = _score(trail, trail)
+    assert iou == pytest.approx(1)
+    assert (matched, annotated_only, predicted_only) == pytest.approx((100, 0, 0))
+
+
+def test_a_prediction_alongside_the_annotation_is_the_same_trail():
+    """
+    The bug this exists for: overlapping two 5 m buffers scored a prediction 3 m to one
+    side of the annotation 0.54, a fail, when by eye it is the same trail.
+    """
+    annotated = _line((0, 10), (100, 10))
+    predicted = _line((0, 13), (100, 13))
+    assert _score(annotated, predicted)[0] == pytest.approx(1)
+
+
+def test_a_prediction_beyond_the_tolerance_is_a_different_trail():
+    annotated = _line((0, 10), (100, 10))
+    predicted = _line((0, 10 + MATCH_TOLERANCE_M + 1), (100, 10 + MATCH_TOLERANCE_M + 1))
+    iou, matched, annotated_only, predicted_only = _score(annotated, predicted)
+    assert iou == 0
+    assert (matched, annotated_only, predicted_only) == pytest.approx((0, 100, 100))
+
+
+def test_an_unpredicted_stretch_counts_as_annotated_only():
+    """The prediction stops at 60 m; the annotation within 5 m of its end still matches."""
+    iou, matched, annotated_only, predicted_only = _score(
+        _line((0, 10), (100, 10)), _line((0, 10), (60, 10)))
+    assert matched == pytest.approx(65)
+    assert annotated_only == pytest.approx(35)
+    assert predicted_only == pytest.approx(0)
+    assert iou == pytest.approx(0.65)
+
+
+def test_an_unannotated_prediction_counts_as_predicted_only():
+    annotated = _line((0, 10), (100, 10))
+    predicted = unary_union([annotated, _line((0, 80), (50, 80))])
+    iou, matched, annotated_only, predicted_only = _score(annotated, predicted)
+    assert (matched, annotated_only, predicted_only) == pytest.approx((100, 0, 50))
+    assert iou == pytest.approx(100 / 150)
+
+
+def test_one_layer_empty_is_total_disagreement_and_both_empty_is_unscored():
+    trail = _line((0, 10), (100, 10))
+    assert _score(trail, None)[0] == 0
+    assert _score(None, trail)[0] == 0
+    assert _score(None, None)[0] is None
+
+
+def test_polygons_are_still_compared_by_overlap():
+    iou, matched, annotated_only, predicted_only = _score(box(0, 0, 10, 10), box(0, 0, 10, 5))
+    assert iou == pytest.approx(0.5)
+    assert (matched, annotated_only, predicted_only) == pytest.approx((50, 50, 0))
+
+
 def test_cell_with_no_trail_is_not_scored():
-    far_away = box(200, 200, 260, 260)
-    iou, gt_area, pred_area = cell_iou(far_away, far_away, CELL)
-    assert iou is None
-    assert (gt_area, pred_area) == (0, 0)
+    far_away = _line((200, 200), (260, 260))
+    assert _score(far_away, far_away, CELL) == (None, 0, 0, 0)
 
 
-def test_cell_with_no_geometry_at_all_is_not_scored():
-    assert cell_iou(None, None, CELL)[0] is None
-
-
-def test_missed_trail_scores_zero():
-    assert cell_iou(box(0, 0, 50, 10), None, CELL)[0] == 0
-
-
-def test_false_positive_scores_zero():
-    assert cell_iou(None, box(0, 0, 50, 10), CELL)[0] == 0
-
-
-def test_cell_iou_only_counts_what_is_inside_the_cell():
+def test_cell_score_only_counts_what_is_inside_the_cell():
     """They agree inside the cell and disagree outside it."""
-    gt = box(0, 0, 50, 10)
-    pred = box(0, 0, 500, 10)
-    assert overlap_iou(gt, pred) == pytest.approx(0.1)
-    assert cell_iou(gt, pred, CELL)[0] == pytest.approx(1)
+    annotated = _line((0, 10), (50, 10))
+    predicted = _line((0, 10), (500, 10))
+    assert _score(annotated, predicted)[0] == pytest.approx(50 / 495)
+    assert _score(annotated, predicted, CELL)[0] == pytest.approx(1)
 
 
-def test_a_sliver_of_trail_is_not_scored():
-    assert cell_iou(box(0, 0, 50, 0.1), None, CELL)[0] is None
+def test_a_match_reaches_across_the_cell_boundary():
+    """
+    The annotation runs just inside the cell and the prediction just outside it, 4 m
+    apart. Matching is done on the whole tile, so the cell sees its trail as matched and
+    not as a miss with the prediction lost to the cell next door.
+    """
+    annotated = _line((0, 48), (50, 48))
+    predicted = _line((0, 52), (50, 52))
+    iou, matched, annotated_only, predicted_only = _score(annotated, predicted, CELL)
+    assert iou == pytest.approx(1)
+    assert (annotated_only, predicted_only) == (0, 0)
+
+
+def test_a_stub_of_trail_is_not_scored():
+    assert _score(_line((0, 10), (3, 10)), None, CELL)[0] is None
+
+
+def _tile_cells(path, gt, pred, cell_size_m=10):
+    return get_cell_metrics("t", path, split_agreement(gt, pred), cell_size_m=cell_size_m)
 
 
 def test_cells_cover_the_tile_and_keep_their_place(tmp_path):
     """40 m tile, 10 m cells: 16 cells whose bounds tile the raster with none missing."""
     path = _write_tile(tmp_path / "t.tif", 100, padding_cols=0)
-    cells = get_cell_metrics("t", path, None, None, cell_size_m=10)
+    cells = _tile_cells(path, None, None)
 
     assert len(cells) == 16
     assert {(c["cell_row"], c["cell_col"]) for c in cells} == {
@@ -189,36 +258,30 @@ def test_cells_cover_the_tile_and_keep_their_place(tmp_path):
 
 def test_cells_that_are_all_padding_are_left_out(tmp_path):
     path = _write_tile(tmp_path / "t.tif", 100, padding_cols=SIZE // 2)
-    cells = get_cell_metrics("t", path, None, None, cell_size_m=10)
+    cells = _tile_cells(path, None, None)
     assert len(cells) == 8
     assert all(c["minx"] >= SIZE // 2 for c in cells)
 
 
-def test_a_buffered_trail_is_shared_out_between_cells_without_loss(tmp_path):
-    """
-    The trail runs along a cell boundary. Its buffer is made on the whole tile, so the
-    cells on both sides hold their share and the shares add up to the whole.
-    """
+def test_a_trail_is_shared_out_between_cells_without_loss(tmp_path):
     path = _write_tile(tmp_path / "t.tif", 100, padding_cols=0)
-    trail = LineString([(5, 20), (35, 20)]).buffer(3)
-    cells = get_cell_metrics("t", path, trail, trail, cell_size_m=10)
-
-    assert sum(c["gt_area"] for c in cells) == pytest.approx(trail.area)
-    above = [c for c in cells if c["cell_row"] == 1 and c["gt_area"] > 0]
-    below = [c for c in cells if c["cell_row"] == 2 and c["gt_area"] > 0]
-    assert len(above) == len(below) == 4
+    trail = _line((2, 5), (38, 33))
+    cells = _tile_cells(path, trail, trail)
+    assert sum(c["matched"] for c in cells) == pytest.approx(trail.length)
 
 
-def test_only_the_cell_where_the_model_missed_fails(tmp_path):
+def test_only_the_cell_where_they_disagree_fails(tmp_path):
     """The tile passes overall; one cell of it does not."""
     path = _write_tile(tmp_path / "t.tif", 100, padding_cols=0)
-    gt = box(0, 2, 40, 8)
-    pred = box(0, 2, 30, 8)
-    cells = get_cell_metrics("t", path, gt, pred, cell_size_m=10)
+    annotated = _line((0, 5), (40, 5))
+    predicted = _line((0, 5), (25, 5))
+    cells = _tile_cells(path, annotated, predicted)
     scored = {c["cell_col"]: c["iou"] for c in cells if c["iou"] is not None}
 
-    assert overlap_iou(gt, pred) == pytest.approx(0.75)
+    assert _score(annotated, predicted)[0] == pytest.approx(0.75)
     assert scored == {0: pytest.approx(1), 1: pytest.approx(1), 2: pytest.approx(1), 3: 0}
+    last = next(c for c in cells if c["cell_col"] == 3 and c["iou"] is not None)
+    assert (last["matched"], last["annotated_only"], last["predicted_only"]) == pytest.approx((0, 10, 0))
 
 
 def _cells(rows):
