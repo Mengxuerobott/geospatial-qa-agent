@@ -7,7 +7,7 @@ It is a single LangGraph ReAct agent with two tools:
 | Tool | What it does |
 | --- | --- |
 | `get_duckdb_metrics` | Reads the tile's IoU, pass/fail verdict, SHAP values and weak areas from DuckDB |
-| `run_vision_analysis` | Sends the tile image to a vision model and reports what is visible |
+| `run_vision_analysis` | Sends the tile image, or one grid cell of it at full resolution, to a vision model and reports what is visible |
 
 Ask *"why did tile SE-31-18-03-W fail?"* and the agent looks up the numbers, then looks at the
 image to check whether they match what is there — shadows, dense vegetation, washed-out
@@ -186,7 +186,7 @@ as percentages and never called an IoU, so neither the LLM nor the `iou_grounded
 mistake one for the tile's IoU. Weak areas never change the verdict: a tile that passed
 with weak areas still passed, and the agent reports them after the verdict.
 
-The viewer does not draw the cells yet, and the vision tool still looks at the whole tile.
+The viewer does not draw the cells yet.
 
 ### The vision tool (`src/agent/vision_tool.py`)
 
@@ -197,6 +197,17 @@ result in memory and base64s it. Nothing is written to disk.
 The image goes to the vision model with a system prompt saying what it is (a drone tile run
 through an animal-trail segmentation model) and asking what is visible. The prompt does not
 say the tile did badly; [What the evals caught](#what-the-evals-caught) explains why.
+
+**Looking at one cell.** A whole tile shrunk to 1024 px shows land cover and lighting, but a
+trail a few pixels wide disappears. So the tool takes an optional `cell`, a name from the
+metrics tool's weak areas such as `r1c5`. It looks up that cell's map bounds in
+`cell_metrics`, reads only that window of the TIFF, and sends it at close to full
+resolution. The prompt then says the image is one square from, say, the north-east of the
+tile. It still does not say the model did badly there.
+
+The agent is told to look at the worst one or two cells, since each vision call is
+token-heavy, and never to pass a cell name the metrics tool did not give it. A name that is
+not shaped like `r1c5` is refused before it reaches the database.
 
 ### Conversation memory
 
@@ -401,6 +412,7 @@ tests/
   test_retry.py            rate-limit retries
   test_shapefiles.py       zipped shapefiles are found at the root or in a folder
   test_tiles.py            paths and sentences are not tile IDs
+  test_vision_crop.py      a cell is cut from the right place and keeps its detail
   test_verdict.py          the pass/fail cut-off and its scorer
 ```
 
