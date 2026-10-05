@@ -38,10 +38,25 @@ You need Python and an OpenAI API key.
    cp .env.example .env
    ```
 
-2. Install the dependencies:
+2. Create a virtual environment and install the dependencies:
+
+   ```bash
+   python3 -m venv .venv
+   ```
+
+   ```bash
+   source .venv/bin/activate
+   ```
 
    ```bash
    pip install -r requirements.txt
+   ```
+
+   On macOS, XGBoost also needs the OpenMP runtime, or the pipeline stops at `import
+   xgboost` with "libomp.dylib could not be loaded":
+
+   ```bash
+   brew install libomp
    ```
 
 3. Put your data under `data/`, one set of files per tile, all named after the tile ID:
@@ -113,21 +128,51 @@ counts as a failure.
 
 ### The metrics tool and the pipeline (`src/metrics/pipeline.py`)
 
-The pipeline walks `data/tiffs/`, pairs each TIFF with its ground-truth and prediction
-shapefile zips, and computes:
+The pipeline walks `data/tiffs/` and pairs each TIFF with its ground-truth and prediction
+shapefile zips. It measures every tile twice: once whole, and once on a grid of 50 m cells
+(`CELL_SIZE_M`).
 
-- **Brightness and contrast**: the mean and standard deviation of the tile's valid colour
-  pixels. The alpha band and the no-data padding around the tile are left out.
-- **IoU** between ground truth and prediction, after reprojecting both to the raster's CRS.
+**Per tile**, it computes the IoU between ground truth and prediction, after reprojecting
+both to the raster's CRS. This is the number the pass/fail verdict uses.
 
 The ground truth is animal trails, which are LineStrings. Lines have no area, so their IoU
 would always be zero. The pipeline buffers line geometry by 5 metres and measures overlap on
 the resulting polygons. Polygons pass through unbuffered.
 
-It then fits an XGBoost regressor that predicts error (`1 - IoU`) from brightness and
-contrast, and runs SHAP over it. The per-tile SHAP values let the agent say *brightness
-pushed this tile's error up* rather than only *this tile is bad*. Everything is written to
-`data/metrics.duckdb`, which `get_duckdb_metrics` reads.
+**Per cell**, it computes the IoU inside the cell and five image attributes, all on valid
+pixels only (the alpha band and the no-data padding are left out):
+
+| Attribute | What it measures |
+| --- | --- |
+| `brightness` | Mean of the colour bands |
+| `contrast` | Standard deviation of the colour bands |
+| `shadow_fraction` | Share of pixels whose brightest band is under 25% of full scale |
+| `greenness` | Excess Green index, `(2G − R − B) / (R + G + B)`: vegetation cover |
+| `sharpness` | Variance of the Laplacian: low when the imagery is blurred |
+
+The cells are windows read out of the TIFF; the image is never cut up. Each cell keeps its
+row, column and map bounds, so it can be drawn back onto the whole tile. Three rules keep
+the cell scores honest:
+
+- Trails are buffered on the whole tile and clipped to the cell afterwards, so a trail near
+  a cell edge is shared between the cells on both sides.
+- A cell with no trail in either layer gets no IoU and is not trained on. There is nothing
+  in it to get right or wrong.
+- A cell with trail in one layer only is a miss or a false positive, and scores 0.
+
+The pipeline then fits one XGBoost regressor across the cells of every tile, predicting
+error (`1 - IoU`) from the five attributes, and runs SHAP over it. The SHAP values let the
+agent say *shadow pushed the error up here* rather than only *this tile is bad*.
+
+Everything is written to `data/metrics.duckdb`, in two tables:
+
+| Table | One row per | Holds |
+| --- | --- | --- |
+| `tile_metrics` | tile | whole-tile IoU, brightness and contrast, how many cells were scored and how many failed, and the mean SHAP value of its cells for each attribute |
+| `cell_metrics` | grid cell | position and map bounds, the five attributes, the cell's IoU, and its own SHAP values |
+
+`get_duckdb_metrics` reads `tile_metrics`. Nothing reads `cell_metrics` yet: the agent and
+the viewer still report per tile.
 
 ### The vision tool (`src/agent/vision_tool.py`)
 
@@ -321,7 +366,7 @@ src/
     vision_tool.py         TIFF → resized JPEG → base64, and the vision call
     qa_agent.py            earlier AgentExecutor version, unused
   metrics/
-    pipeline.py            IoU → XGBoost → SHAP → DuckDB
+    pipeline.py            per-tile and per-cell metrics → XGBoost → SHAP → DuckDB
     shapefiles.py          finds the .shp inside a zipped export, for the pipeline and viewer
     visualizer.py          the matplotlib overlay Streamlit renders
     image_extractor.py     standalone image feature extraction, unused
@@ -336,7 +381,7 @@ evals/
 tests/
   test_evaluators.py       proves the scorers can fail
   test_history.py          the history window never orphans a tool result
-  test_pipeline.py         padding and the alpha band stay out of the image metrics
+  test_pipeline.py         image metrics ignore padding; cells are scored and placed correctly
   test_retry.py            rate-limit retries
   test_shapefiles.py       zipped shapefiles are found at the root or in a folder
   test_tiles.py            paths and sentences are not tile IDs
@@ -345,15 +390,17 @@ tests/
 
 ## Limitations
 
-- **The SHAP model trains on six tiles.** That is enough for the values to vary across tiles
-  (IoU ranges from 0.51 to 0.98, and the three lowest-contrast tiles are the three worst
-  performers), but fifty trees on six samples is memorisation. Treat the SHAP output as a
-  demonstration of the mechanism, not a calibrated model. More tiles is the biggest
-  improvement available.
-- **Rebuild the database after changing the pipeline.** Brightness and contrast are computed
-  on valid pixels only. An earlier version averaged all four bands over every pixel, so the
-  numbers mostly measured how much padding a tile had. A database built before that change
-  holds the old values.
+- **The SHAP model has few tiles behind it.** It trains on grid cells, so it has far more
+  rows than tiles, but cells from the same tile share lighting and ground cover and are not
+  independent samples. Treat the SHAP output as a guide to where to look, not a calibrated
+  model. More tiles is still the biggest improvement available.
+- **Attributes that move together share the blame arbitrarily.** A shadowed cell is also a
+  dark one, so SHAP may credit `brightness` for what `shadow_fraction` describes, or the
+  reverse.
+- **Rebuild the database after pulling a pipeline change.** A database built before the
+  per-cell metrics has no `cell_metrics` table, and its SHAP values came from a model
+  trained on whole tiles. The eval reference values are read from the database, so push
+  the dataset again afterwards (`python evals/dataset.py`).
 - **Unreadable tiles are skipped, not scored 0.** An IoU of 0.0 cannot be told apart from a
   prediction that missed. Zipped shapefiles are read whether the `.shp` is at the archive
   root or inside a folder named after the tile.
