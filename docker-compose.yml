@@ -8,7 +8,9 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      - ./data:/app/data
+      # Read-only: the services only read the data. The TIFFs, shapefiles and database
+      # are maintained from the host, by whoever runs the pipeline.
+      - ./data:/app/data:ro
     env_file:
       - .env
 
@@ -19,7 +21,9 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      - ./data:/app/data
+      # Read-only: the services only read the data. The TIFFs, shapefiles and database
+      # are maintained from the host, by whoever runs the pipeline.
+      - ./data:/app/data:ro
     environment:
       # Tell Streamlit to talk to the "api" container, not localhost
       - API_URL=http://api:8000/chat

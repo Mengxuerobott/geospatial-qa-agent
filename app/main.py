@@ -82,7 +82,7 @@ with col1:
         st.subheader("📊 Tile Metrics (From DuckDB)")
         if os.path.exists(db_path):
             try:
-                with duckdb.connect(db_path) as conn:
+                with duckdb.connect(db_path, read_only=True) as conn:
                     query = "SELECT iou, brightness, contrast FROM tile_metrics WHERE tile_id = ?"
                     df_metrics = conn.execute(query, [selected_tile]).df()
                     

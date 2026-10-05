@@ -1,6 +1,7 @@
 import os
 import sys
 import glob
+import time
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -299,6 +300,38 @@ def summarise_tiles(tiles, cells):
     return tiles
 
 
+def write_database(tiles, cells, db_path, attempts=5, wait_seconds=2.0):
+    """
+    Writes the two tables to a new database file and swaps it into place.
+
+    The viewer and the API read the database while this runs. Writing into the live file
+    would need a lock they hold, and would let them see one table rebuilt and the other
+    not. So the new database is built beside the old one and renamed over it in one step:
+    a reader gets the whole old database or the whole new one.
+
+    On Windows the rename fails while a reader has the file open. Readers hold it for the
+    length of one query, so it is retried a few times before giving up.
+    """
+    new_path = db_path + ".new"
+    for leftover in (new_path, new_path + ".wal"):
+        if os.path.exists(leftover):
+            os.remove(leftover)
+
+    conn = duckdb.connect(new_path)
+    conn.execute("CREATE TABLE tile_metrics AS SELECT * FROM tiles")
+    conn.execute("CREATE TABLE cell_metrics AS SELECT * FROM cells")
+    conn.close()
+
+    for attempt in range(attempts):
+        try:
+            os.replace(new_path, db_path)
+            return
+        except PermissionError:
+            if attempt == attempts - 1:
+                raise
+            time.sleep(wait_seconds)
+
+
 @traceable(run_type="chain", name="run_pipeline")
 def run_pipeline():
     print("🚀 Starting the Geospatial QA Data Pipeline...")
@@ -365,13 +398,8 @@ def run_pipeline():
     tiles = summarise_tiles(pd.DataFrame(tile_rows), cells)
 
     print(f"💾 Saving complete dataset to DuckDB at {DB_PATH}...")
-    conn = duckdb.connect(DB_PATH)
-    conn.execute("CREATE OR REPLACE TABLE tile_metrics AS SELECT * FROM tiles")
-    conn.execute("CREATE OR REPLACE TABLE cell_metrics AS SELECT * FROM cells")
-    tile_count = conn.execute("SELECT COUNT(*) FROM tile_metrics").fetchone()[0]
-    cell_count = conn.execute("SELECT COUNT(*) FROM cell_metrics").fetchone()[0]
-    print(f"✅ Pipeline Complete! Successfully wrote {tile_count} tiles and {cell_count} cells to the database.")
-    conn.close()
+    write_database(tiles, cells, DB_PATH)
+    print(f"✅ Pipeline Complete! Successfully wrote {len(tiles)} tiles and {len(cells)} cells to the database.")
 
 if __name__ == "__main__":
     run_pipeline()

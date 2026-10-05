@@ -52,7 +52,7 @@ def _lookup_iou(tile_id: str) -> float:
         raise SystemExit(
             f"No database at {DB_PATH}. Run `python src/metrics/pipeline.py` first."
         )
-    with duckdb.connect(DB_PATH) as conn:
+    with duckdb.connect(DB_PATH, read_only=True) as conn:
         rows = conn.execute(
             "SELECT iou FROM tile_metrics WHERE tile_id = ?", [tile_id]
         ).fetchall()

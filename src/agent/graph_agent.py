@@ -41,7 +41,9 @@ def get_duckdb_metrics(tile_id: str) -> str:
     if not os.path.exists(DB_PATH):
         return "Database not found."
         
-    with duckdb.connect(DB_PATH) as conn:
+    # Read-only: the tools never write, and a read-write connection locks the file against
+    # every other process, so two people asking at once would fail one of them
+    with duckdb.connect(DB_PATH, read_only=True) as conn:
         # tile_id comes from the LLM, so it is bound as a parameter, never formatted in
         query = "SELECT * FROM tile_metrics WHERE tile_id = ?"
         tile_data = conn.execute(query, [tile_id]).df()
@@ -109,7 +111,7 @@ def run_vision_analysis(tile_id: str, specific_question: str, cell: Optional[str
         return f'"{cell}" is not a cell name. Cells are named like "r1c5".'
     if not os.path.exists(DB_PATH):
         return "Database not found."
-    with duckdb.connect(DB_PATH) as conn:
+    with duckdb.connect(DB_PATH, read_only=True) as conn:
         try:
             found = conn.execute(
                 "SELECT minx, miny, maxx, maxy FROM cell_metrics "
