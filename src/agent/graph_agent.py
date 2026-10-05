@@ -7,6 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain.tools import tool
 from langgraph.prebuilt import create_react_agent
 
+from src.agent.cells import describe_weak_cells
 from src.agent.history import recent_turns
 from src.agent.tiles import is_valid_tile_id
 from src.agent.verdict import FAIL_IOU_THRESHOLD, verdict
@@ -27,8 +28,9 @@ TIFF_DIR = os.path.join(root_dir, "data", "tiffs")
 @tool
 def get_duckdb_metrics(tile_id: str) -> str:
     """
-    Queries the DuckDB database to get the IoU score, Brightness, Contrast, 
-    and SHAP values for a specific tile. Use this to get mathematical metrics.
+    Queries the DuckDB database to get the IoU score, the pass/fail verdict and the
+    SHAP values for a specific tile, plus the weak areas inside it: the grid cells where
+    the model did badly. Use this to get mathematical metrics.
     """
     if not os.path.exists(DB_PATH):
         return "Database not found."
@@ -37,6 +39,12 @@ def get_duckdb_metrics(tile_id: str) -> str:
         # tile_id comes from the LLM, so it is bound as a parameter, never formatted in
         query = "SELECT * FROM tile_metrics WHERE tile_id = ?"
         tile_data = conn.execute(query, [tile_id]).df()
+        try:
+            cells = conn.execute(
+                "SELECT * FROM cell_metrics WHERE tile_id = ?", [tile_id]).df()
+        except duckdb.CatalogException:
+            # A database built before the pipeline scored cells has no such table
+            cells = None
     
     if tile_data.empty:
         return f"Tile {tile_id} not found in the database."
@@ -44,12 +52,18 @@ def get_duckdb_metrics(tile_id: str) -> str:
     row = tile_data.iloc[0]
     # The verdict is computed here rather than left to the LLM, which otherwise invents its
     # own cut-off and has called a 0.51 tile "a moderate match" that "did not fail".
-    return (
+    shap = ", ".join(
+        f"{column[len('shap_'):].replace('_', ' ').capitalize()} SHAP impact: {row[column]:.4f}"
+        for column in tile_data.columns if column.startswith("shap_")
+    )
+    metrics = (
         f"Tile {tile_id} Metrics - IoU: {row['iou']:.4f} "
         f"(QA verdict: {verdict(row['iou']).upper()}; tiles below {FAIL_IOU_THRESHOLD} fail), "
-        f"Brightness SHAP impact: {row['shap_brightness']:.4f}, "
-        f"Contrast SHAP impact: {row['shap_contrast']:.4f}."
+        f"{shap}."
     )
+    if cells is None or cells.empty:
+        return metrics
+    return f"{metrics}\n{describe_weak_cells(cells)}"
 
 # --- Agent Tool 2: The Vision Annotator (GPT-4o Multimodal) ---
 @tool
@@ -96,7 +110,8 @@ def create_graph_agent(checkpointer=None):
     # System prompt dictating which tool to call when
     system_prompt = """You are an expert Geospatial QA agent. 
     You have two tools:
-    1. The metrics tool (get_duckdb_metrics), which provides mathematical IoU and SHAP values.
+    1. The metrics tool (get_duckdb_metrics), which provides mathematical IoU and SHAP values,
+       and lists the weak areas of the tile: grid cells where the model did badly.
     2. The vision tool (run_vision_analysis), which can physically look at the drone imagery.
     
     When a user asks why a tile failed:
@@ -136,7 +151,16 @@ def create_graph_agent(checkpointer=None):
     support, and never omit an IoU because it is inconvenient to the question you were asked.
     This holds after a vision tool call too: the answer still opens with whether the tile
     failed and its IoU, and only then reports what the vision tool saw. What it sees in a
-    tile that scored well are conditions the model coped with, not causes of a failure."""
+    tile that scored well are conditions the model coped with, not causes of a failure.
+
+    A tile that passed can still have weak areas, and a tile that failed has usually failed
+    in some places more than others. The metrics tool lists them. Report weak areas only
+    when it does, after the verdict and the IoU, and say where they are. They never change
+    the verdict: a passed tile with weak areas still passed. Give a weak area's score as a
+    percentage, as the tool does, and never call it an IoU; the IoU is the tile's alone.
+    A question that asks only for a tile's score needs one sentence on its weak areas, not
+    the list. When you call the vision tool about a tile that has weak areas, tell it where
+    they are so it looks there."""
 
     # LangGraph's prebuilt ReAct agent handles the complex routing/state automatically
     # Only the last few turns are sent to the LLM, so a long chat does not keep growing the
