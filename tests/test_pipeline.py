@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import rasterio
+from rasterio.crs import CRS
 from rasterio.enums import ColorInterp
 from rasterio.transform import from_origin
 from shapely.geometry import LineString, box
@@ -21,6 +22,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import src.metrics.pipeline as pipeline  # noqa: E402
 from src.metrics.pipeline import (  # noqa: E402
     agreement,
+    crs_problem,
+    full_scale,
     get_cell_metrics,
     get_image_metrics,
     image_features,
@@ -335,3 +338,84 @@ def test_tile_summary_counts_failing_cells_and_averages_shap():
     assert tiles.loc["a", "shap_shadow_fraction"] == pytest.approx(
         cells[(cells["tile_id"] == "a") & cells["iou"].notna()]["shap_shadow_fraction"].mean())
     assert {"iou", "shap_brightness", "shap_contrast"} <= set(tiles.columns)
+
+
+# --- Units and bit depth ---
+
+def test_a_crs_in_metres_is_accepted():
+    assert crs_problem(CRS.from_epsg(32612)) is None      # UTM zone 12N
+    assert crs_problem(CRS.from_epsg(3400)) is None       # Alberta 10-TM
+
+
+def test_a_crs_in_degrees_is_refused():
+    """In degrees a 5 "metre" tolerance matches everything and the tile scores 1.0."""
+    assert "degrees" in crs_problem(CRS.from_epsg(4326))
+
+
+def test_a_crs_in_feet_is_refused():
+    assert "not metres" in crs_problem(CRS.from_epsg(2227))   # California zone 3, US feet
+
+
+def test_a_missing_crs_is_refused():
+    assert crs_problem(None) == "it has no CRS"
+
+
+def _write_deep_tile(path, brightest: int, dark_rows: int = 0) -> str:
+    """A 16-bit tile whose pixels reach `brightest`, with its top rows nearly black."""
+    rgb = np.full((3, SIZE, SIZE), brightest, dtype=np.uint16)
+    rgb[:, :, ::2] = int(brightest * 0.8)
+    rgb[:, :dark_rows, :] = int(brightest * 0.05)
+    with rasterio.open(path, "w", driver="GTiff", height=SIZE, width=SIZE, count=3,
+                       dtype="uint16", crs="EPSG:32612",
+                       transform=from_origin(0, SIZE, 1, 1)) as dst:
+        dst.write(rgb)
+    return str(path)
+
+
+def test_full_scale_of_8_bit_imagery_is_255(tmp_path):
+    with rasterio.open(_write_tile(tmp_path / "t.tif", 40, padding_cols=0)) as src:
+        assert full_scale(src, [1, 2, 3]) == 255
+
+
+def test_full_scale_of_deep_imagery_is_what_it_actually_reaches(tmp_path):
+    """A 12-bit camera in a 16-bit file: full scale is about 4000, not 65535."""
+    with rasterio.open(_write_deep_tile(tmp_path / "t.tif", brightest=4000)) as src:
+        assert full_scale(src, [1, 2, 3]) == pytest.approx(4000, rel=0.01)
+
+
+def test_deep_imagery_is_not_all_shadow(tmp_path):
+    """
+    The bug this exists for: measured against 65535, every pixel of 12-bit imagery was
+    under the shadow threshold, so shadow_fraction was 1.0 for every cell of every tile.
+    """
+    path = _write_deep_tile(tmp_path / "t.tif", brightest=4000, dark_rows=SIZE // 4)
+    cells = get_cell_metrics("t", path, split_agreement(None, None), cell_size_m=SIZE)
+    assert len(cells) == 1
+    assert cells[0]["shadow_fraction"] == pytest.approx(0.25)
+
+
+def test_brightness_is_on_one_scale_whatever_the_bit_depth(tmp_path):
+    """So tiles of different depths can be trained on together."""
+    deep = get_cell_metrics("t", _write_deep_tile(tmp_path / "deep.tif", brightest=4000),
+                            split_agreement(None, None), cell_size_m=SIZE)[0]
+    assert 200 < deep["brightness"] <= 255
+
+
+def test_a_tile_in_degrees_is_skipped_by_the_pipeline(tmp_path, monkeypatch, capsys):
+    for folder in ("tiffs", "ground_truth", "predictions"):
+        (tmp_path / folder).mkdir()
+    with rasterio.open(tmp_path / "tiffs" / "t.tif", "w", driver="GTiff", height=10, width=10,
+                       count=3, dtype="uint8", crs="EPSG:4326",
+                       transform=from_origin(-111, 45, 0.0001, 0.0001)) as dst:
+        dst.write(np.full((3, 10, 10), 100, dtype=np.uint8))
+    monkeypatch.setattr(pipeline, "TIFF_DIR", str(tmp_path / "tiffs"))
+    monkeypatch.setattr(pipeline, "GT_DIR", str(tmp_path / "ground_truth"))
+    monkeypatch.setattr(pipeline, "PRED_DIR", str(tmp_path / "predictions"))
+    monkeypatch.setattr(pipeline, "DB_PATH", str(tmp_path / "m.duckdb"))
+
+    pipeline.run_pipeline()
+
+    output = capsys.readouterr().out
+    assert "is in degrees, not metres" in output
+    assert "Nothing written to the database" in output
+    assert not (tmp_path / "m.duckdb").exists()

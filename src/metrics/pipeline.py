@@ -92,6 +92,47 @@ def get_image_metrics(tiff_path):
         print(f"Error reading {tiff_path}: {e}")
         return None, None
 
+def crs_problem(crs):
+    """
+    Why a raster's CRS cannot be measured in metres, or None when it can.
+
+    The match tolerance and the cell size are distances in metres, applied in the
+    raster's own coordinates. In degrees a tolerance of 5 spans the planet: every line
+    matches every other and the tile scores a perfect 1.0. In feet the tolerance is a
+    third of what was meant. Neither raises an error, so it is checked here.
+    """
+    if crs is None:
+        return "it has no CRS"
+    if not crs.is_projected:
+        return f"its CRS ({crs.to_string()}) is in degrees, not metres"
+    factor = crs.linear_units_factor[1]
+    if abs(factor - 1.0) > 1e-6:
+        return f"its CRS ({crs.to_string()}) is in {crs.linear_units}, not metres"
+    return None
+
+
+def full_scale(src, colour_bands):
+    """
+    The value of a fully bright pixel in this raster.
+
+    8-bit imagery fills its range, so 255. Deeper imagery rarely does: a 12-bit camera
+    writing a 16-bit file never passes 4095, and measured against 65535 every pixel of
+    it would count as shadow. So the brightest the imagery actually gets is used, read
+    from a reduced copy and taken just under the maximum so a few blown-out pixels do
+    not set the scale.
+    """
+    if src.dtypes[0] == 'uint8':
+        return 255.0
+
+    shrink = min(1.0, MAX_CELL_READ_PX / max(src.height, src.width))
+    shape = (max(1, int(src.height * shrink)), max(1, int(src.width * shrink)))
+    valid = src.dataset_mask(out_shape=shape) > 0
+    if not valid.any():
+        return 1.0
+    pixels = src.read(colour_bands, out_shape=(len(colour_bands), *shape))[:, valid]
+    return float(max(np.percentile(pixels, 99.9), 1e-9))
+
+
 def load_geometries(gt_path, pred_path, tiff_path):
     """
     Ground truth and prediction as one geometry each, in the raster's CRS. Either is None
@@ -217,8 +258,10 @@ def image_features(img, valid, scale):
     sharpness = float(laplacian[inner].var()) if inner.any() else None
 
     return {
-        'brightness': float(pixels.mean()),
-        'contrast': float(pixels.std()),
+        # On a 0..255 scale whatever the bit depth, so tiles of different depths can be
+        # trained on together
+        'brightness': float(pixels.mean() / scale * 255.0),
+        'contrast': float(pixels.std() / scale * 255.0),
         'shadow_fraction': float((value < SHADOW_VALUE).mean()),
         'greenness': greenness,
         'sharpness': sharpness,
@@ -239,7 +282,7 @@ def get_cell_metrics(tile_id, tiff_path, parts, cell_size_m=CELL_SIZE_M):
     with rasterio.open(tiff_path) as src:
         colour_bands = [i for i, interp in enumerate(src.colorinterp, start=1)
                         if interp != ColorInterp.alpha]
-        scale = 255.0 if src.dtypes[0] == 'uint8' else float(np.iinfo(src.dtypes[0]).max)
+        scale = full_scale(src, colour_bands)
         cell_px = max(1, round(cell_size_m / abs(src.res[0])))
         # A cell is read at no more than this many pixels a side, so memory stays flat
         # however fine the imagery is
@@ -362,6 +405,14 @@ def run_pipeline():
     for tiff_path in tiff_files:
         tile_id = os.path.basename(tiff_path).replace('.tif', '')
         print(f"Processing Tile: {tile_id}...")
+
+        with rasterio.open(tiff_path) as src:
+            problem = crs_problem(src.crs)
+        if problem:
+            print(f"  -> Skipping: {problem}. Reproject the TIFF to a CRS in metres, "
+                  "such as its UTM zone.")
+            skipped.append(tile_id)
+            continue
         
         gt_path = os.path.join(GT_DIR, f"{tile_id}.zip")
         pred_path = os.path.join(PRED_DIR, f"{tile_id}.zip")
