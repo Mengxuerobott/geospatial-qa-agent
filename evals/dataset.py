@@ -28,46 +28,67 @@ from src.agent.verdict import verdict  # noqa: E402
 DB_PATH = os.path.join(ROOT_DIR, "data", "metrics.duckdb")
 DATASET_NAME = "geospatial-qa-agent-evals"
 
-# The tile this dataset is written against -- the worst performer, so the diagnostic
-# questions have something real to explain. Kept as a constant so swapping tiles is a
-# one-line change.
-TILE = "SE-31-18-03-W"
-# Tiles the model did well on. Used to check the agent does not diagnose failure on
-# request when the metrics do not support it. Several, because one example flipping
-# from fail to pass after a prompt change is not enough to conclude anything -- the
-# false premise needs to arrive in different shapes.
-GOOD_TILE = "SW-35-12-18-W"
-GOOD_TILE_2 = "SE-34-12-18-W"
-GOOD_TILE_3 = "SE-35-12-18-W"
-# The two tiles nearest the pass threshold, one either side. A cut-off the agent only
-# gets right at 0.51 and 0.98 has not been tested.
-NEAR_FAIL_TILE = "NE-24-05-16-W"
-NEAR_PASS_TILE = "NE-27-24-03-W"
 MISSING_TILE = "Z-99-99-99-W9M"
 
 
-def _lookup_iou(tile_id: str) -> float:
-    """Read the ground-truth IoU straight from the pipeline's output."""
+def pick_tiles(ious: dict) -> dict:
+    """
+    Which tile plays which part in the examples, chosen from the scores in the database.
+
+    The parts used to be tile IDs written here by hand. They were right for the scores of
+    the day, and silently wrong after the IoU was redefined: the "failed" tile could pass,
+    and the two tiles meant to sit either side of the threshold could both be above it.
+
+    - worst: the lowest score, so the diagnostic questions have something real to explain
+    - good: the three best tiles that passed. The false-premise questions claim these
+      failed; three, because the false premise needs to arrive in different shapes
+    - near_fail / near_pass: the tiles nearest the threshold on each side. A cut-off the
+      agent only gets right far from the threshold has not been tested
+    """
+    ranked = sorted(ious, key=ious.get)
+    passed = [t for t in ranked if verdict(ious[t]) == "passed"]
+    failed = [t for t in ranked if verdict(ious[t]) == "failed"]
+
+    if not failed:
+        raise SystemExit(
+            "No tile in the database fails QA, so the examples about a failed tile have "
+            "nothing to ask about. Add a tile that fails, or raise FAIL_IOU_THRESHOLD.")
+    if len(passed) < 3:
+        raise SystemExit(
+            f"Only {len(passed)} tile(s) in the database pass QA; the false-premise "
+            "examples need three.")
+
+    return {
+        "worst": failed[0],
+        "good": passed[-1:-4:-1],
+        "near_fail": failed[-1],
+        "near_pass": passed[0],
+    }
+
+
+def _all_ious() -> dict:
+    """Every tile's IoU, straight from the pipeline's output."""
     if not os.path.exists(DB_PATH):
         raise SystemExit(
             f"No database at {DB_PATH}. Run `python src/metrics/pipeline.py` first."
         )
     with duckdb.connect(DB_PATH, read_only=True) as conn:
-        rows = conn.execute(
-            "SELECT iou FROM tile_metrics WHERE tile_id = ?", [tile_id]
-        ).fetchall()
-    if not rows:
-        raise SystemExit(f"Tile {tile_id} is not in the database.")
-    return float(rows[0][0])
+        return {tile_id: float(iou) for tile_id, iou in
+                conn.execute("SELECT tile_id, iou FROM tile_metrics").fetchall()}
 
 
-def build_examples() -> list[dict]:
-    iou = _lookup_iou(TILE)
-    good_iou = _lookup_iou(GOOD_TILE)
-    good_iou_2 = _lookup_iou(GOOD_TILE_2)
-    good_iou_3 = _lookup_iou(GOOD_TILE_3)
-    near_fail_iou = _lookup_iou(NEAR_FAIL_TILE)
-    near_pass_iou = _lookup_iou(NEAR_PASS_TILE)
+def build_examples(ious: dict | None = None) -> list[dict]:
+    """The examples, written against the tiles pick_tiles chooses from ious."""
+    ious = _all_ious() if ious is None else ious
+    tiles = pick_tiles(ious)
+
+    TILE = tiles["worst"]
+    GOOD_TILE, GOOD_TILE_2, GOOD_TILE_3 = tiles["good"]
+    NEAR_FAIL_TILE, NEAR_PASS_TILE = tiles["near_fail"], tiles["near_pass"]
+
+    iou = ious[TILE]
+    good_iou, good_iou_2, good_iou_3 = (ious[t] for t in tiles["good"])
+    near_fail_iou, near_pass_iou = ious[NEAR_FAIL_TILE], ious[NEAR_PASS_TILE]
 
     return [
         # --- Routing: metrics only. Opening an image for these is wasted latency+tokens. ---
@@ -258,7 +279,11 @@ def split_example(example: dict) -> tuple[dict, dict]:
 
 def sync() -> None:
     client = Client()
-    examples = build_examples()
+    ious = _all_ious()
+    examples = build_examples(ious)
+    for part, chosen in pick_tiles(ious).items():
+        for tile_id in ([chosen] if isinstance(chosen, str) else chosen):
+            print(f"  {part:<10} {tile_id}  IoU {ious[tile_id]:.4f}")
 
     if client.has_dataset(dataset_name=DATASET_NAME):
         dataset = client.read_dataset(dataset_name=DATASET_NAME)
