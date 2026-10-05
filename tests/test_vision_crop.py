@@ -173,8 +173,8 @@ class _FakeLLM:
     """Stands in for ChatOpenAI and keeps what it was sent."""
     sent = None
 
-    def __init__(self, **_):
-        pass
+    def __init__(self, **settings):
+        _FakeLLM.settings = settings
 
     def invoke(self, messages):
         _FakeLLM.sent = messages
@@ -221,3 +221,13 @@ def test_the_whole_tile_is_never_drawn_on(monkeypatch, tmp_path):
     prompt, images = _sent_to_model(monkeypatch, tmp_path, trail_zips=zips)
     assert len(images) == 1
     assert "Cyan" not in prompt and "downscaled" in prompt
+
+
+def test_the_vision_model_is_the_one_set_in_the_environment(monkeypatch, tmp_path):
+    _sent_to_model(monkeypatch, tmp_path)
+    assert _FakeLLM.settings["model"] == "gpt-4o-mini"
+
+    monkeypatch.setenv("VISION_MODEL", "a-stronger-model")
+    monkeypatch.setenv("AGENT_MODEL", "not-this-one")
+    _sent_to_model(monkeypatch, tmp_path)
+    assert _FakeLLM.settings["model"] == "a-stronger-model"

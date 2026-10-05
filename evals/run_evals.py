@@ -33,6 +33,7 @@ from evals.evaluators import ALL_EVALUATORS  # noqa: E402
 from evals.retry import is_rate_limit, with_backoff  # noqa: E402
 from src.agent.graph_agent import create_graph_agent, with_viewer_context  # noqa: E402
 from src.agent.history import recent_turns  # noqa: E402
+from src.agent.models import agent_model, vision_model  # noqa: E402
 
 
 def _tools_called(messages) -> list[str]:
@@ -117,7 +118,8 @@ def main() -> None:
         experiment_prefix=args.prefix,
         max_concurrency=args.concurrency,
         client=client,
-        metadata={"model": "gpt-4o-mini"},
+        # Recorded with the experiment, so runs with different models can be told apart
+        metadata={"agent_model": agent_model(), "vision_model": vision_model()},
     )
 
     print()

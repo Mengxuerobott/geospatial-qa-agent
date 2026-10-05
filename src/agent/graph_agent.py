@@ -9,6 +9,7 @@ from langgraph.prebuilt import create_react_agent
 
 from src.agent.cells import compass, describe_weak_cells, parse_cell_name
 from src.agent.history import recent_turns
+from src.agent.models import agent_model
 from src.agent.tiles import is_valid_tile_id
 from src.agent.verdict import FAIL_IOU_THRESHOLD, MATCH_TOLERANCE_M, verdict
 
@@ -81,7 +82,7 @@ def get_duckdb_metrics(tile_id: str) -> str:
         return metrics
     return f"{metrics}\n{describe_weak_cells(cells)}"
 
-# --- Agent Tool 2: The Vision Annotator (GPT-4o Multimodal) ---
+# --- Agent Tool 2: The Vision Annotator (multimodal) ---
 @tool
 def run_vision_analysis(tile_id: str, specific_question: str, cell: Optional[str] = None) -> str:
     """
@@ -153,7 +154,7 @@ def create_graph_agent(checkpointer=None):
     Without one, every invoke is a fresh single-turn conversation (what the evals want).
     """
     # The agent's LLM
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    llm = ChatOpenAI(model=agent_model(), temperature=0)
     
     # The tools available to the agent
     tools = [get_duckdb_metrics, run_vision_analysis]

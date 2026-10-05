@@ -20,6 +20,7 @@ load_dotenv(dotenv_path=env_path)
 
 # Run as a script, sys.path[0] is src/agent, so the project root has to be added
 sys.path.insert(0, root_dir)
+from src.agent.models import vision_model  # noqa: E402
 from src.agent.verdict import MATCH_TOLERANCE_M  # noqa: E402
 from src.metrics.shapefiles import trails_within  # noqa: E402
 
@@ -218,7 +219,7 @@ def _image_part(base64_image: str) -> dict:
 def analyze_image_visually(image_path: str, user_prompt: str, bounds=None,
                            location: str = "", trail_zips=None) -> str:
     """
-    Sends a resized image and a text prompt to GPT-4o-mini for visual analysis.
+    Sends a resized image and a text prompt to the vision model for visual analysis.
 
     With bounds, (minx, miny, maxx, maxy) in the raster's CRS, it sends that part of the
     tile alone; location says where in the tile that is, e.g. "north-east". With
@@ -244,14 +245,14 @@ def analyze_image_visually(image_path: str, user_prompt: str, bounds=None,
             Annotated=ANNOTATED[0].capitalize(), Predicted=PREDICTED[0].capitalize())
 
     # Initialize the Vision LLM
-    vision_llm = ChatOpenAI(model="gpt-4o-mini", max_tokens=500, temperature=0)
+    vision_llm = ChatOpenAI(model=vision_model(), max_tokens=500, temperature=0)
     
     # Construct the Multimodal Message
     message = HumanMessage(
         content=[{"type": "text", "text": user_prompt}, *(_image_part(b64) for b64 in images)]
     )
     
-    logger.info("Sending %d image(s) for visual analysis", len(images))
+    logger.info("Sending %d image(s) to %s for visual analysis", len(images), vision_model())
     response = vision_llm.invoke([SystemMessage(content=system_prompt), message])
     
     return response.content

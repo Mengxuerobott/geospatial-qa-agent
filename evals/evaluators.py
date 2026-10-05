@@ -26,6 +26,10 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from evals.retry import with_backoff  # noqa: E402
 from src.agent.verdict import FAIL_IOU_THRESHOLD  # noqa: E402
 
+# Fixed, and deliberately not AGENT_MODEL: the judges are the yardstick, and a yardstick
+# that changes with the model under test cannot compare two of them.
+JUDGE_MODEL = "gpt-4o-mini"
+
 NOT_FOUND_PHRASES = ("not found", "no data", "not in the database", "doesn't exist",
                      "does not exist", "no record", "unable to find", "couldn't find")
 
@@ -221,7 +225,7 @@ def judge_pushback(inputs: dict, outputs: dict, reference_outputs: dict) -> dict
     )
 
     try:
-        judge = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        judge = ChatOpenAI(model=JUDGE_MODEL, temperature=0)
         reply = with_backoff(lambda: judge.invoke(prompt).content)
     except Exception as exc:
         return {"key": "judge_pushback", "score": None, "comment": f"judge call failed: {exc}"}
@@ -282,7 +286,7 @@ def judge_verdict(inputs: dict, outputs: dict, reference_outputs: dict) -> dict:
     )
 
     try:
-        judge = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        judge = ChatOpenAI(model=JUDGE_MODEL, temperature=0)
         reply = with_backoff(lambda: judge.invoke(prompt).content)
     except Exception as exc:
         return {"key": "judge_verdict", "score": None, "comment": f"judge call failed: {exc}"}
