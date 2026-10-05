@@ -45,11 +45,20 @@ def compass(cell, extent) -> str:
 
 
 def _what_went_wrong(cell) -> str:
-    if cell["pred_area"] == 0:
-        return "trail missed entirely"
-    if cell["gt_area"] == 0:
-        return "trail predicted where there is none"
-    return f"{cell['iou']:.0%} of the trail matched"
+    """
+    How the prediction and the annotation disagree in a cell, without saying which is
+    right: the annotation is a person's work and can be the one that is wrong.
+    """
+    annotated, predicted = cell["annotated_only"], cell["predicted_only"]
+    if cell["matched"] == 0 and predicted == 0:
+        return f"{annotated:.0f} m of annotated trail with no prediction near it"
+    if cell["matched"] == 0 and annotated == 0:
+        return f"{predicted:.0f} m of predicted trail with no annotation near it"
+    disagreements = " and ".join(
+        f"{length:.0f} m {kind}" for length, kind in
+        ((annotated, "annotated but not predicted"), (predicted, "predicted but not annotated"))
+        if length >= 0.5)
+    return f"{cell['iou']:.0%} of the trail matched, {disagreements}"
 
 
 def _main_driver(cell) -> str:

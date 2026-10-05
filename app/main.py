@@ -10,7 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # The agent itself runs behind the FastAPI backend; this app only talks to it over HTTP
 from src.metrics.visualizer import plot_tile_results
-from src.agent.verdict import FAIL_IOU_THRESHOLD
+from src.agent.verdict import FAIL_IOU_THRESHOLD, MATCH_TOLERANCE_M
 
 # --- Page Config ---
 st.set_page_config(page_title="Geospatial QA Agent", layout="wide")
@@ -61,9 +61,11 @@ with col1:
                 cells = None
         has_cells = cells is not None and not cells.empty
         show_cells = has_cells and st.checkbox(
-            "Show where the model did badly", value=True,
-            help="Shades each grid cell by how much of its trail the model missed or "
-                 "wrongly predicted. Cells below the pass threshold are outlined and named; "
+            "Show where prediction and annotation disagree", value=True,
+            help="Shades each grid cell by how much of its trail is annotated but not "
+                 "predicted, or predicted but not annotated. Lines within "
+                 f"{MATCH_TOLERANCE_M:g} m of each other count as the same trail. "
+                 "Cells below the pass threshold are outlined and named; "
                  "use the name in the chat, e.g. \"look at r1c5\".")
 
         with st.spinner(f"Loading map for {selected_tile}..."):

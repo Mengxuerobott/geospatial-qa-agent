@@ -17,14 +17,22 @@ from src.agent.cells import cell_name, compass, describe_weak_cells  # noqa: E40
 EXTENT = (0, 0, 300, 300)
 
 
-def _cell(row, col, iou, gt_area=100.0, pred_area=100.0, shadow=0.0, shap_shadow=0.0):
+def _cell(row, col, iou, matched=None, annotated_only=None, predicted_only=0.0,
+          shadow=0.0, shap_shadow=0.0):
     """A 100 m cell of a 3x3 tile; row 0 is the northern edge."""
+    # By default the disagreement is all annotated trail the model did not predict
+    trail = 100.0
+    if matched is None:
+        matched = trail * (iou or 0)
+    if annotated_only is None:
+        annotated_only = trail - matched - predicted_only
     return {
         "tile_id": "t", "cell_row": row, "cell_col": col,
         "minx": col * 100, "maxx": col * 100 + 100,
         "miny": 200 - row * 100, "maxy": 300 - row * 100,
         "brightness": 120.0, "shadow_fraction": shadow,
-        "gt_area": gt_area, "pred_area": pred_area, "iou": iou,
+        "matched": matched, "annotated_only": annotated_only,
+        "predicted_only": predicted_only, "iou": iou,
         "shap_brightness": -0.01, "shap_shadow_fraction": shap_shadow,
     }
 
@@ -78,12 +86,30 @@ def test_worst_cell_comes_first():
     assert text.index("r2c2") < text.index("r1c1") < text.index("r0c0")
 
 
-def test_a_miss_and_a_false_positive_are_told_apart():
+def test_the_two_directions_of_disagreement_are_told_apart():
     text = describe_weak_cells(_tile(
-        _cell(0, 0, 0.0, pred_area=0.0), _cell(2, 2, 0.0, gt_area=0.0), _cell(1, 1, 0.4)))
-    assert "r0c0 (north-west): trail missed entirely" in text
-    assert "r2c2 (south-east): trail predicted where there is none" in text
-    assert "r1c1 (centre): 40% of the trail matched" in text
+        _cell(0, 0, 0.0, annotated_only=80.0),
+        _cell(2, 2, 0.0, annotated_only=0.0, predicted_only=60.0),
+        _cell(1, 1, 0.4, matched=40.0, annotated_only=45.0, predicted_only=15.0)))
+    assert "r0c0 (north-west): 80 m of annotated trail with no prediction near it" in text
+    assert "r2c2 (south-east): 60 m of predicted trail with no annotation near it" in text
+    assert ("r1c1 (centre): 40% of the trail matched, 45 m annotated but not predicted "
+            "and 15 m predicted but not annotated") in text
+
+
+def test_only_the_direction_that_happened_is_mentioned():
+    text = describe_weak_cells(_tile(_cell(1, 1, 0.5, matched=50.0, annotated_only=50.0)))
+    assert "50 m annotated but not predicted" in text
+    assert "predicted but not annotated" not in text
+
+
+def test_the_wording_does_not_say_who_is_wrong():
+    """The annotation is a person's work; a disagreement is not proof the model erred."""
+    text = describe_weak_cells(_tile(
+        _cell(0, 0, 0.0, annotated_only=80.0),
+        _cell(2, 2, 0.0, annotated_only=0.0, predicted_only=60.0))).lower()
+    for blame in ("missed", "false", "wrong", "error", "where there is none"):
+        assert blame not in text
 
 
 def test_main_driver_is_the_largest_positive_shap_with_its_value():

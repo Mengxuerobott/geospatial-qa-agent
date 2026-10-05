@@ -10,7 +10,7 @@ from langgraph.prebuilt import create_react_agent
 from src.agent.cells import compass, describe_weak_cells, parse_cell_name
 from src.agent.history import recent_turns
 from src.agent.tiles import is_valid_tile_id
-from src.agent.verdict import FAIL_IOU_THRESHOLD, verdict
+from src.agent.verdict import FAIL_IOU_THRESHOLD, MATCH_TOLERANCE_M, verdict
 
 # Add vision tool import
 from src.agent.vision_tool import analyze_image_visually
@@ -61,6 +61,14 @@ def get_duckdb_metrics(tile_id: str) -> str:
         f"(QA verdict: {verdict(row['iou']).upper()}; tiles below {FAIL_IOU_THRESHOLD} fail), "
         f"{shap}."
     )
+    if "matched" in tile_data.columns:
+        # How the IoU breaks down, so the LLM can say which way the disagreement runs
+        metrics += (
+            f"\nTrail lengths (lines within {MATCH_TOLERANCE_M:g} m count as the same trail): "
+            f"{row['matched']:.0f} m matched, "
+            f"{row['annotated_only']:.0f} m annotated but not predicted, "
+            f"{row['predicted_only']:.0f} m predicted but not annotated."
+        )
     if cells is None or cells.empty:
         return metrics
     return f"{metrics}\n{describe_weak_cells(cells)}"
@@ -141,7 +149,8 @@ def create_graph_agent(checkpointer=None):
     system_prompt = """You are an expert Geospatial QA agent. 
     You have two tools:
     1. The metrics tool (get_duckdb_metrics), which provides mathematical IoU and SHAP values,
-       and lists the weak areas of the tile: grid cells where the model did badly.
+       and lists the weak areas of the tile: grid cells where the prediction and the
+       annotation disagree.
     2. The vision tool (run_vision_analysis), which can physically look at the drone imagery:
        the whole tile, or one grid cell of it at full resolution.
     
@@ -184,6 +193,15 @@ def create_graph_agent(checkpointer=None):
     failed and its IoU, and only then reports what the vision tool saw. What it sees in a
     tile that scored well are conditions the model coped with, not causes of a failure.
 
+    The IoU compares the model's predicted trails with trails drawn by a human annotator.
+    The annotator's lines sit near the real trail, not exactly on it, so a predicted trail
+    within """ + f"{MATCH_TOLERANCE_M:g}" + """ metres of an annotated one counts as the same trail. What is left is
+    disagreement of two kinds: trail that was annotated but not predicted, and trail that
+    was predicted but not annotated. The annotation can be the one that is wrong, so
+    describe these as disagreements between the prediction and the annotation. Say the
+    model missed a trail, or invented one, only when the vision tool has looked at that
+    place and the image supports it.
+
     A tile that passed can still have weak areas, and a tile that failed has usually failed
     in some places more than others. The metrics tool lists them. Report weak areas only
     when it does, after the verdict and the IoU, and say where they are. They never change
@@ -192,7 +210,7 @@ def create_graph_agent(checkpointer=None):
     A question that asks only for a tile's score needs one sentence on its weak areas, not
     the list.
 
-    To see why a weak area went wrong, call the vision tool with that cell's name. It then
+    To see what is behind a weak area, call the vision tool with that cell's name. It then
     looks at that cell alone at full resolution, where a thin trail is visible; the whole
     tile is too coarse for that. Look at the worst one or two cells, not every cell listed.
     Never pass a cell name the metrics tool did not give you."""

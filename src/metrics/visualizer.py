@@ -12,7 +12,8 @@ from src.agent.cells import cell_name
 from src.agent.verdict import FAIL_IOU_THRESHOLD
 from src.metrics.shapefiles import shapefile_uri
 
-# One hue, light to dark, for how much of a cell's trail the model got wrong. Blue, because
+# One hue, light to dark, for how much of a cell's trail the prediction and the annotation
+# disagree on. Blue, because
 # green and red already mean ground truth and prediction on this map.
 ERROR_CMAP = LinearSegmentedColormap.from_list(
     "cell_error", ["#cde2fb", "#6da7ec", "#256abf", "#0d366b"])
@@ -22,8 +23,8 @@ MAX_CELL_LABELS = 20
 
 def _draw_cells(ax, cells):
     """
-    Shade each scored grid cell by its error, and outline and name the ones below the
-    pass threshold. Returns False when there was nothing to draw.
+    Shade each scored grid cell by how much the prediction and the annotation disagree in
+    it, and outline and name the ones below the pass threshold. Returns False when there was nothing to draw.
 
     A cell that failed is marked by its outline and its name, not by its shade alone, and
     the name is the one to use in the chat ("look at r1c5"). Cells with no trail in them
@@ -77,7 +78,7 @@ def plot_tile_results(tiff_path: str, gt_path: str, pred_path: str, tile_id: str
     Returns a matplotlib figure that Streamlit can render.
 
     cells is the tile's rows from cell_metrics. When given, the grid cells are shaded by
-    how badly the model did in each, under the trail lines.
+    how much the prediction and the annotation disagree in each, under the trail lines.
     """
     fig, ax = plt.subplots(figsize=(10, 10))
     tiff_crs = None
@@ -119,7 +120,7 @@ def plot_tile_results(tiff_path: str, gt_path: str, pred_path: str, tile_id: str
         labels.append(f"Cell below the pass threshold ({FAIL_IOU_THRESHOLD:.0%} match)")
         scale = fig.colorbar(ScalarMappable(norm=Normalize(0, 100), cmap=ERROR_CMAP), ax=ax,
                              orientation="horizontal", fraction=0.035, pad=0.02)
-        scale.set_label("Trail missed or wrongly predicted in the cell (%)")
+        scale.set_label("Trail the prediction and the annotation disagree on, per cell (%)")
         scale.outline.set_visible(False)
 
     ax.legend(custom_lines, labels, loc="upper right", facecolor="white", framealpha=0.9)
