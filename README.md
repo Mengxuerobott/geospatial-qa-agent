@@ -191,7 +191,7 @@ Everything is written to `data/metrics.duckdb`, in two tables:
 
 | Table | One row per | Holds |
 | --- | --- | --- |
-| `tile_metrics` | tile | whole-tile IoU and its three lengths, brightness and contrast, how many cells were scored and how many failed, and the mean SHAP value of its cells for each attribute |
+| `tile_metrics` | tile | the raster's CRS, whole-tile IoU and its three lengths, brightness and contrast, how many cells were scored and how many failed, and the mean SHAP value of its cells for each attribute |
 | `cell_metrics` | grid cell | position and map bounds, the five attributes, the cell's IoU and its three lengths, and its own SHAP values |
 
 `get_duckdb_metrics` reads both. Its reply is the tile's IoU, verdict and SHAP values, the
@@ -283,7 +283,8 @@ look like a tile ID gets a 422. `GET /` is a health check.
 ### The frontend (`app/main.py`)
 
 The left column draws the whole tile with ground truth in green and predictions in red over
-the RGB raster, plus the DuckDB metrics, including how many cells failed.
+the RGB raster, plus the DuckDB metrics, including how many cells failed, and the download
+buttons for [the review list](#the-review-list-srcmetricsreviewpy).
 
 With **Show where prediction and annotation disagree** ticked, each scored grid cell is
 shaded blue by how much of its trail is annotated but not predicted, or predicted but not
@@ -294,6 +295,34 @@ type *"look at r1c5"* in the chat. Cells with no trail in them were never scored
 left clear. When more than 20 cells fail, all are outlined and the worst 20 are named. The right column is the chat, which posts to the API. It
 sends one `thread_id` per browser session and the selected tile with every message; **New
 conversation** starts a fresh thread.
+
+### The review list (`src/metrics/review.py`)
+
+The cells below the pass threshold can be exported as a GeoJSON file, one square per cell,
+to open in QGIS or ArcGIS over the original imagery. The annotation can be the side that is
+wrong, so the list is for annotators as much as for whoever looks after the model.
+
+```bash
+python src/metrics/review.py
+```
+
+That writes `data/review/disagreements.geojson` for every tile in the database. The viewer
+offers the same list as two download buttons under the metrics: one for the tile on screen,
+one for all tiles.
+
+Each square carries:
+
+| Property | Meaning |
+| --- | --- |
+| `tile_id`, `cell`, `location` | Which tile, the cell's name (`r1c5`), and the part of the tile it is in |
+| `match` | The cell's IoU, 0 to 1 |
+| `matched_m`, `annotated_only_m`, `predicted_only_m` | The three trail lengths in metres |
+| `disagreement` | The same sentence the agent is given, e.g. "51 m of annotated trail with no prediction near it" |
+| `main_driver` | The image attribute SHAP holds most responsible, if any |
+
+The file is in longitude and latitude (EPSG:4326), as GeoJSON requires, so tiles in
+different projections sit on one map. The list is every cell below the threshold. It does
+not record what the vision tool said about a cell, since that is only asked for in the chat.
 
 ## LangSmith tracing
 
@@ -428,7 +457,7 @@ pytest tests/ -q
 ## Layout
 
 ```text
-data/                      TIFFs, ground truth zips, prediction zips, metrics.duckdb
+data/                      TIFFs, ground truth zips, prediction zips, metrics.duckdb, review/
 src/
   api/server.py            FastAPI, holds one agent instance and its conversation memory
   agent/
@@ -441,6 +470,7 @@ src/
     qa_agent.py            earlier AgentExecutor version, unused
   metrics/
     pipeline.py            per-tile and per-cell metrics → XGBoost → SHAP → DuckDB
+    review.py              exports the cells below the threshold as GeoJSON
     shapefiles.py          finds and reads the .shp inside a zipped export
     visualizer.py          the matplotlib map Streamlit renders: trails and shaded cells
     image_extractor.py     standalone image feature extraction, unused
@@ -458,6 +488,7 @@ tests/
   test_history.py          the history window never orphans a tool result
   test_pipeline.py         image metrics ignore padding; cells are scored and placed correctly
   test_retry.py            rate-limit retries
+  test_review.py           the review list holds the right cells in the right place
   test_shapefiles.py       zipped shapefiles are found at the root or in a folder
   test_tiles.py            paths and sentences are not tile IDs
   test_vision_crop.py      a cell is cut from the right place and its trails drawn on a second copy
