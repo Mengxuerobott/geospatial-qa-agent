@@ -8,7 +8,7 @@ It is a single LangGraph ReAct agent with two tools:
 | Tool | What it does |
 | --- | --- |
 | `get_duckdb_metrics` | Reads the tile's IoU, pass/fail verdict, SHAP values and weak areas from DuckDB |
-| `run_vision_analysis` | Sends the tile image, or one grid cell of it at full resolution, to a vision model and reports what is visible |
+| `run_vision_analysis` | Sends the tile image to a vision model and reports what is visible; for one grid cell, it also reports whether a trail is visible where prediction and annotation disagree |
 
 Ask *"why did tile SE-31-18-03-W fail?"* and the agent looks up the numbers, then looks at the
 image to check whether they match what is there — shadows, dense vegetation, washed-out
@@ -226,13 +226,28 @@ say the tile did badly; [What the evals caught](#what-the-evals-caught) explains
 **Looking at one cell.** A whole tile shrunk to 1024 px shows land cover and lighting, but a
 trail a few pixels wide disappears. So the tool takes an optional `cell`, a name from the
 metrics tool's weak areas such as `r1c5`. It looks up that cell's map bounds in
-`cell_metrics`, reads only that window of the TIFF, and sends it at close to full
-resolution. The prompt then says the image is one square from, say, the north-east of the
-tile. It still does not say the model did badly there.
+`cell_metrics`, reads only that window of the TIFF plus 10 m around it, and sends it at
+close to full resolution.
 
-The agent is told to look at the worst one or two cells, since each vision call is
-token-heavy, and never to pass a cell name the metrics tool did not give it. A name that is
-not shaped like `r1c5` is refused before it reaches the database.
+**Seeing where the lines disagree.** The cell is sent as two images. The first is the
+imagery untouched. The second is the same imagery with the annotated trails drawn in cyan
+and the predicted trails in magenta, colours that do not occur in vegetation, soil or snow.
+Two images, because a line drawn over a thin trail hides it.
+
+The prompt tells the vision model that lines within 5 m of each other are the same trail,
+and asks it, wherever one colour runs without the other, to look at that spot in the first
+image and answer one of three things: a trail is visible there, no trail is visible
+although the ground is clear, or it cannot tell. It is told that "cannot tell" is the right
+answer when unsure, and that neither the annotator nor the model is assumed to be right.
+
+A small vision model reading a thin trail from above will sometimes be wrong. The agent is
+told to pass its answer on as what the image appears to show and as a place for a person to
+check, not as settled.
+
+The agent is also told to look at the worst one or two cells, since each call now sends two
+images, and never to pass a cell name the metrics tool did not give it. A name that is not
+shaped like `r1c5` is refused before it reaches the database. If the shapefiles cannot be
+read, or the cell has no trail in it, the crop is sent once without lines.
 
 ### Conversation memory
 
@@ -303,7 +318,7 @@ decorated by hand:
 | Function | Why |
 | --- | --- |
 | `analyze_image_visually` | Parent span, so the encode step and the vision call sit in one subtree |
-| `encode_and_resize_tiff` | Records the base64 *length* only; the payload is about 320 KB per call |
+| `encode_and_resize_tiff`, `encode_cell_with_trails` | Record the base64 *length* only; the payload is about 320 KB per image |
 | `run_pipeline`, `train_and_explain` | The XGBoost and SHAP batch job, which involves no LLM |
 
 A question that needs the image produces this trace:
@@ -426,7 +441,7 @@ src/
     qa_agent.py            earlier AgentExecutor version, unused
   metrics/
     pipeline.py            per-tile and per-cell metrics → XGBoost → SHAP → DuckDB
-    shapefiles.py          finds the .shp inside a zipped export, for the pipeline and viewer
+    shapefiles.py          finds and reads the .shp inside a zipped export
     visualizer.py          the matplotlib map Streamlit renders: trails and shaded cells
     image_extractor.py     standalone image feature extraction, unused
     spatial_calculator.py  standalone polygon error helpers, unused
@@ -445,7 +460,7 @@ tests/
   test_retry.py            rate-limit retries
   test_shapefiles.py       zipped shapefiles are found at the root or in a folder
   test_tiles.py            paths and sentences are not tile IDs
-  test_vision_crop.py      a cell is cut from the right place and keeps its detail
+  test_vision_crop.py      a cell is cut from the right place and its trails drawn on a second copy
   test_verdict.py          the pass/fail cut-off and its scorer
   test_visualizer.py       failing cells are shaded, outlined and named on the map
 ```
