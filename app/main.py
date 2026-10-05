@@ -158,6 +158,7 @@ with col2:
     
     # Use environment variable for Docker, default to localhost for local testing
     API_URL = os.getenv("API_URL", "http://localhost:8000/chat")
+    API_TIMEOUT_SECONDS = 300
     
     # A new thread_id gives the agent a blank memory; the old thread is simply abandoned.
     # This runs before the history is drawn, so the cleared chat shows on this same rerun.
@@ -190,6 +191,9 @@ with col2:
                             "thread_id": st.session_state.thread_id,
                             "selected_tile": selected_tile if available_tiles else None,
                         },
+                        # 5 s to connect, then as long as a question that looks at two
+                        # cells can take. Without a limit a stuck call froze the chat.
+                        timeout=(5, API_TIMEOUT_SECONDS),
                     )
                     
                     if response.status_code == 200:
@@ -198,6 +202,13 @@ with col2:
                         # Save assistant response to history
                         st.session_state.messages.append({"role": "assistant", "content": answer})
                     else:
-                        st.error(f"API Error {response.status_code}: {response.text}")
+                        try:
+                            detail = response.json().get("detail", response.text)
+                        except ValueError:
+                            detail = response.text
+                        st.error(f"{detail} (API error {response.status_code})")
                 except requests.exceptions.ConnectionError:
                     st.error("❌ Could not connect to the Backend API. Is FastAPI running?")
+                except requests.exceptions.Timeout:
+                    st.error(f"The agent took longer than {API_TIMEOUT_SECONDS} seconds to "
+                             "answer. Ask again, or ask about one cell at a time.")

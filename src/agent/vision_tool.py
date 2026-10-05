@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 import base64
@@ -24,6 +25,9 @@ from src.metrics.shapefiles import trails_within  # noqa: E402
 
 if not os.getenv("OPENAI_API_KEY"):
     raise ValueError(f"CRITICAL: OPENAI_API_KEY not found. Checked path: {env_path}")
+
+logger = logging.getLogger(__name__)
+
 
 def _summarize_b64(outputs) -> dict:
     """
@@ -198,7 +202,7 @@ def _trails_in(image_path: str, bounds, trail_zips):
             crs = src.crs
         annotated, predicted = (trails_within(path, crs, bounds) for path in trail_zips)
     except Exception as e:
-        print(f"  -> Could not read the trails for this crop: {e}")
+        logger.warning("Could not read the trails for this crop: %s", e)
         return None
     return None if annotated is None and predicted is None else (annotated, predicted)
 
@@ -224,7 +228,8 @@ def analyze_image_visually(image_path: str, user_prompt: str, bounds=None,
     if not os.path.exists(image_path):
         return f"Error: Image not found at {image_path}"
 
-    print(f"👁️  Resizing and encoding massive TIFF: {os.path.basename(image_path)}...")
+    logger.info("Encoding %s%s", os.path.basename(image_path),
+                "" if bounds is None else f" ({location or 'one'} cell)")
     image = WHOLE_TILE if bounds is None else ONE_CELL.format(location=location or "middle")
     system_prompt = VISION_SYSTEM_PROMPT.format(image=image)
 
@@ -246,7 +251,7 @@ def analyze_image_visually(image_path: str, user_prompt: str, bounds=None,
         content=[{"type": "text", "text": user_prompt}, *(_image_part(b64) for b64 in images)]
     )
     
-    print("🧠 Sending resized image to GPT-4o-mini for visual analysis...")
+    logger.info("Sending %d image(s) for visual analysis", len(images))
     response = vision_llm.invoke([SystemMessage(content=system_prompt), message])
     
     return response.content
