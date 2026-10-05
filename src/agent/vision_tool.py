@@ -1,6 +1,7 @@
 import os
 import base64
 import rasterio
+from rasterio.windows import Window, from_bounds
 import cv2
 import numpy as np
 from dotenv import load_dotenv
@@ -27,15 +28,23 @@ def _summarize_b64(outputs) -> dict:
     return {"base64_chars": len(b64)}
 
 @traceable(run_type="tool", name="encode_and_resize_tiff", process_outputs=_summarize_b64)
-def encode_and_resize_tiff(tiff_path: str, max_size: int = 1024) -> str:
+def encode_and_resize_tiff(tiff_path: str, max_size: int = 1024, bounds=None) -> str:
     """
     Reads a massive drone TIFF, extracts RGB, resizes it to a safe dimension, 
     compresses it to JPEG, and returns a base64 string for the LLM.
+
+    bounds is (minx, miny, maxx, maxy) in the raster's CRS. When given, only that part of
+    the tile is read, so a small area keeps the detail the whole tile loses on resizing.
     """
     with rasterio.open(tiff_path) as src:
         # Read the first 3 bands (Assuming RGB)
         # rasterio reads as (Channels, Height, Width)
-        img_array = src.read([1, 2, 3])
+        if bounds is None:
+            img_array = src.read([1, 2, 3])
+        else:
+            window = from_bounds(*bounds, transform=src.transform).round_offsets().round_lengths()
+            window = window.intersection(Window(0, 0, src.width, src.height))
+            img_array = src.read([1, 2, 3], window=window)
         
         # Transpose to (Height, Width, Channels) for OpenCV
         img_array = np.transpose(img_array, (1, 2, 0))
@@ -64,14 +73,19 @@ def encode_and_resize_tiff(tiff_path: str, max_size: int = 1024) -> str:
 
 # Without this the model gets a bare question and an image, and tends to answer that it
 # "cannot analyze the image directly" instead of describing what is in it.
+# What the image is, for the whole tile and for one grid cell of it
+WHOLE_TILE = "an aerial drone tile, downscaled from the original TIFF"
+ONE_CELL = ("one small square cut from the {location} of an aerial drone tile, at close to "
+            "full resolution. It shows that part of the tile only")
+
 VISION_SYSTEM_PROMPT = """You are an expert geospatial imagery annotator. The attached image is
-an aerial drone tile, downscaled from the original TIFF. A segmentation model was run on it to
+{image}. A segmentation model was run on it to
 detect animal trails. You are not told how well the model did, so do not assume it did badly:
 the tile may have scored very well.
 
 Describe what you actually see in this image: land cover (forest, shrub, grass, bare ground,
 water, snow) and lighting (shadows, glare, washed-out or very dark areas). Say where in the
-tile things are (e.g. "upper left", "along the right edge"). Mention something that would make
+image things are (e.g. "upper left", "along the right edge"). Mention something that would make
 a thin trail hard to see only if it is clearly present. If the image is evenly lit and clear,
 say so plainly; do not go looking for problems or speculate about what "might" or "could"
 cause difficulty.
@@ -81,15 +95,21 @@ something is not visible or you cannot tell at this resolution, say so rather th
 Do not give generic advice about how to inspect an image."""
 
 @traceable(run_type="chain", name="analyze_image_visually")
-def analyze_image_visually(image_path: str, user_prompt: str) -> str:
+def analyze_image_visually(image_path: str, user_prompt: str, bounds=None,
+                           location: str = "") -> str:
     """
     Sends a resized image and a text prompt to GPT-4o-mini for visual analysis.
+
+    With bounds, (minx, miny, maxx, maxy) in the raster's CRS, it sends that part of the
+    tile alone; location says where in the tile that is, e.g. "north-east".
     """
     if not os.path.exists(image_path):
         return f"Error: Image not found at {image_path}"
 
     print(f"👁️  Resizing and encoding massive TIFF: {os.path.basename(image_path)}...")
-    base64_image = encode_and_resize_tiff(image_path, max_size=1024)
+    base64_image = encode_and_resize_tiff(image_path, max_size=1024, bounds=bounds)
+    image = WHOLE_TILE if bounds is None else ONE_CELL.format(location=location or "middle")
+    system_prompt = VISION_SYSTEM_PROMPT.format(image=image)
     
     # Initialize the Vision LLM
     vision_llm = ChatOpenAI(model="gpt-4o-mini", max_tokens=500, temperature=0)
@@ -109,7 +129,7 @@ def analyze_image_visually(image_path: str, user_prompt: str) -> str:
     )
     
     print("🧠 Sending resized image to GPT-4o-mini for visual analysis...")
-    response = vision_llm.invoke([SystemMessage(content=VISION_SYSTEM_PROMPT), message])
+    response = vision_llm.invoke([SystemMessage(content=system_prompt), message])
     
     return response.content
 

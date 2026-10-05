@@ -6,6 +6,8 @@ that passed overall can still have. Kept free of agent imports so it can be unit
 without an API key.
 """
 
+import re
+
 import pandas as pd
 
 from src.agent.verdict import FAIL_IOU_THRESHOLD
@@ -20,6 +22,12 @@ _COLS = ("west", "", "east")
 def cell_name(cell_row: int, cell_col: int) -> str:
     """The name the tools use for a cell, e.g. 'r3c5': row 3 from the top, column 5."""
     return f"r{int(cell_row)}c{int(cell_col)}"
+
+
+def parse_cell_name(name):
+    """(cell_row, cell_col) for a name like 'r3c5', or None if it is not one."""
+    match = re.fullmatch(r"r(\d{1,4})c(\d{1,4})", name.strip().lower()) if isinstance(name, str) else None
+    return (int(match.group(1)), int(match.group(2))) if match else None
 
 
 def compass(cell, extent) -> str:

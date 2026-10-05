@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langchain.tools import tool
 from langgraph.prebuilt import create_react_agent
 
-from src.agent.cells import describe_weak_cells
+from src.agent.cells import compass, describe_weak_cells, parse_cell_name
 from src.agent.history import recent_turns
 from src.agent.tiles import is_valid_tile_id
 from src.agent.verdict import FAIL_IOU_THRESHOLD, verdict
@@ -67,10 +67,14 @@ def get_duckdb_metrics(tile_id: str) -> str:
 
 # --- Agent Tool 2: The Vision Annotator (GPT-4o Multimodal) ---
 @tool
-def run_vision_analysis(tile_id: str, specific_question: str) -> str:
+def run_vision_analysis(tile_id: str, specific_question: str, cell: Optional[str] = None) -> str:
     """
     Physically looks at the drone TIFF image to answer visual questions.
     Use this when you need to confirm if there are shadows, dense vegetation, or visual anomalies.
+
+    Without cell it sees the whole tile, downscaled: enough for land cover and lighting,
+    too coarse for a thin trail. Pass cell, a name from the metrics tool's weak areas such
+    as "r1c5", to look at that one grid cell at close to full resolution.
     """
     # tile_id comes from the LLM and becomes part of a file path
     if not is_valid_tile_id(tile_id):
@@ -80,8 +84,34 @@ def run_vision_analysis(tile_id: str, specific_question: str) -> str:
     if not os.path.exists(tiff_path):
         return f"Image file for {tile_id} not found."
     
-    # Calls the resizer and vision LLM we just built!
-    return analyze_image_visually(tiff_path, specific_question)
+    if not cell:
+        return analyze_image_visually(tiff_path, specific_question)
+
+    # cell comes from the LLM too; it is parsed to two integers and bound, never formatted in
+    position = parse_cell_name(cell)
+    if position is None:
+        return f'"{cell}" is not a cell name. Cells are named like "r1c5".'
+    if not os.path.exists(DB_PATH):
+        return "Database not found."
+    with duckdb.connect(DB_PATH) as conn:
+        try:
+            found = conn.execute(
+                "SELECT minx, miny, maxx, maxy FROM cell_metrics "
+                "WHERE tile_id = ? AND cell_row = ? AND cell_col = ?", [tile_id, *position]).df()
+            extent = conn.execute(
+                "SELECT min(minx), min(miny), max(maxx), max(maxy) FROM cell_metrics "
+                "WHERE tile_id = ?", [tile_id]).fetchone()
+        except duckdb.CatalogException:
+            return "This database has no grid cells. Look at the whole tile instead."
+    if found.empty:
+        return f"Tile {tile_id} has no cell {cell}."
+
+    bounds = found.iloc[0]
+    return analyze_image_visually(
+        tiff_path, specific_question,
+        bounds=(bounds["minx"], bounds["miny"], bounds["maxx"], bounds["maxy"]),
+        location=compass(bounds, extent),
+    )
 
 # --- Viewer context ---
 def with_viewer_context(message: str, selected_tile: Optional[str]) -> str:
@@ -112,7 +142,8 @@ def create_graph_agent(checkpointer=None):
     You have two tools:
     1. The metrics tool (get_duckdb_metrics), which provides mathematical IoU and SHAP values,
        and lists the weak areas of the tile: grid cells where the model did badly.
-    2. The vision tool (run_vision_analysis), which can physically look at the drone imagery.
+    2. The vision tool (run_vision_analysis), which can physically look at the drone imagery:
+       the whole tile, or one grid cell of it at full resolution.
     
     When a user asks why a tile failed:
     First, use the metrics tool to get the SHAP metrics.
@@ -159,8 +190,12 @@ def create_graph_agent(checkpointer=None):
     the verdict: a passed tile with weak areas still passed. Give a weak area's score as a
     percentage, as the tool does, and never call it an IoU; the IoU is the tile's alone.
     A question that asks only for a tile's score needs one sentence on its weak areas, not
-    the list. When you call the vision tool about a tile that has weak areas, tell it where
-    they are so it looks there."""
+    the list.
+
+    To see why a weak area went wrong, call the vision tool with that cell's name. It then
+    looks at that cell alone at full resolution, where a thin trail is visible; the whole
+    tile is too coarse for that. Look at the worst one or two cells, not every cell listed.
+    Never pass a cell name the metrics tool did not give you."""
 
     # LangGraph's prebuilt ReAct agent handles the complex routing/state automatically
     # Only the last few turns are sent to the LLM, so a long chat does not keep growing the
