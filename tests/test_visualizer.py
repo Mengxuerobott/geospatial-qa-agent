@@ -140,3 +140,11 @@ def test_sixteen_bit_imagery_is_stretched_into_view(tmp_path):
     fig = plot_tile_results(path, "none.zip", "none.zip", "t")
     assert _base_image(fig).get_array().max() == pytest.approx(1.0)
     plt.close(fig)
+
+
+def test_cells_are_named_by_trail_in_dispute_when_the_lengths_are_known(ax, monkeypatch):
+    """The map names the same cells, in the same order, as the agent and the review list."""
+    monkeypatch.setattr(visualizer, "MAX_CELL_LABELS", 1)
+    cells = _cells([0.0, 0.4]).assign(annotated_only=[6.0, 60.0], predicted_only=[0.0, 0.0])
+    _draw_cells(ax, cells)
+    assert [t.get_text() for t in ax.texts] == ["r0c1"]

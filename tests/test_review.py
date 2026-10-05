@@ -39,7 +39,13 @@ def _tiles(*tile_ids, crs="EPSG:32612"):
     return pd.DataFrame({"tile_id": list(tile_ids), "crs": crs})
 
 
-def test_only_cells_below_the_threshold_are_listed_worst_first():
+def test_the_list_is_ordered_by_trail_in_dispute():
+    cells = pd.DataFrame([_cell("a", 0, 0, 0.0, matched=0.0, annotated_only=6.0),
+                          _cell("a", 1, 1, 0.4, matched=40.0, annotated_only=60.0)])
+    assert review_list(_tiles("a"), cells)["cell"].to_list() == ["r1c1", "r0c0"]
+
+
+def test_only_cells_below_the_threshold_are_listed():
     cells = pd.DataFrame([_cell("a", 0, 0, 0.9), _cell("a", 1, 1, 0.5), _cell("a", 2, 2, 0.1),
                           _cell("a", 0, 2, None), _cell("a", 2, 0, 0.75)])
     review = review_list(_tiles("a"), cells)

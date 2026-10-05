@@ -139,3 +139,30 @@ def test_cell_scores_cannot_be_mistaken_for_the_tile_iou():
     assert "IoU" not in weak and "iou" not in weak
     answer = f"The tile passed with an IoU of 0.93. {weak}"
     assert iou_grounded({"answer": answer}, {"expected_iou": 0.93})["score"] == 1
+
+
+def test_cells_are_ordered_by_trail_in_dispute_not_by_score():
+    """
+    A stub of unmatched trail scores 0 and used to be listed first. A cell with ten times
+    as much in dispute is the one to check first, whatever its score.
+    """
+    text = describe_weak_cells(_tile(
+        _cell(0, 0, 0.0, matched=0.0, annotated_only=6.0),
+        _cell(1, 1, 0.4, matched=40.0, annotated_only=60.0),
+        _cell(2, 2, 0.7, matched=70.0, annotated_only=20.0, predicted_only=10.0)))
+    assert "Most trail in dispute first" in text
+    assert text.index("r1c1") < text.index("r2c2") < text.index("r0c0")
+
+
+def test_both_directions_count_towards_what_is_in_dispute():
+    text = describe_weak_cells(_tile(
+        _cell(0, 0, 0.5, matched=50.0, annotated_only=50.0),
+        _cell(2, 2, 0.4, matched=40.0, annotated_only=30.0, predicted_only=30.0)))
+    assert text.index("r2c2") < text.index("r0c0")
+
+
+def test_equal_lengths_fall_back_to_the_lower_score():
+    text = describe_weak_cells(_tile(
+        _cell(0, 0, 0.5, matched=30.0, annotated_only=30.0),
+        _cell(2, 2, 0.0, matched=0.0, annotated_only=30.0)))
+    assert text.index("r2c2") < text.index("r0c0")

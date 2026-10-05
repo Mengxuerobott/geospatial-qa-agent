@@ -107,3 +107,13 @@ def test_the_database_can_be_rebuilt_while_someone_is_reading(tmp_path, another_
 
     write_database(_tiles(0.9), _cells(), str(db))
     assert _iou(db) == 0.9
+
+
+def test_cells_from_before_the_trail_lengths_do_not_break_the_metrics_tool(tmp_path, monkeypatch):
+    """Such a database has cell_metrics, but not the columns a weak area is described from."""
+    db = tmp_path / "m.duckdb"
+    old_cells = _cells().drop(columns=["matched", "annotated_only", "predicted_only"])
+    write_database(_tiles(0.9), old_cells, str(db))
+    monkeypatch.setattr(graph_agent, "DB_PATH", str(db))
+    reply = graph_agent.get_duckdb_metrics.invoke({"tile_id": "t"})
+    assert "IoU: 0.9000" in reply and "Weak areas" not in reply

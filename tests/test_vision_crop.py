@@ -176,9 +176,12 @@ class _FakeLLM:
     def __init__(self, **settings):
         _FakeLLM.settings = settings
 
+    finish_reason = "stop"
+
     def invoke(self, messages):
         _FakeLLM.sent = messages
-        return type("Reply", (), {"content": "seen"})()
+        return type("Reply", (), {
+            "content": "seen", "response_metadata": {"finish_reason": _FakeLLM.finish_reason}})()
 
 
 def _sent_to_model(monkeypatch, tmp_path, **kwargs):
@@ -231,3 +234,20 @@ def test_the_vision_model_is_the_one_set_in_the_environment(monkeypatch, tmp_pat
     monkeypatch.setenv("AGENT_MODEL", "not-this-one")
     _sent_to_model(monkeypatch, tmp_path)
     assert _FakeLLM.settings["model"] == "a-stronger-model"
+
+
+def test_a_cell_with_trails_gets_more_room_to_answer_than_a_tile(monkeypatch, tmp_path):
+    zips = (_zip_trails(tmp_path, "gt", [ANNOTATED]), _zip_trails(tmp_path, "pred", [PREDICTED]))
+    _sent_to_model(monkeypatch, tmp_path)
+    tile_limit = _FakeLLM.settings["max_tokens"]
+    _sent_to_model(monkeypatch, tmp_path, bounds=CELL, trail_zips=zips)
+    assert _FakeLLM.settings["max_tokens"] > tile_limit
+
+
+def test_a_reply_cut_off_at_the_limit_says_so(monkeypatch, tmp_path):
+    """Otherwise the agent reports the places it got to as if they were all there are."""
+    monkeypatch.setattr(vision_tool, "ChatOpenAI", _FakeLLM)
+    monkeypatch.setattr(_FakeLLM, "finish_reason", "length")
+    reply = analyze_image_visually(_write_tile(tmp_path / "t.tif"), "what is here?")
+    assert reply.startswith("seen")
+    assert "cut off at its length limit" in reply

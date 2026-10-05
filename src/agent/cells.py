@@ -74,13 +74,24 @@ def main_driver(cell):
     return feature if shap[feature] > 0 else None
 
 
+def in_dispute(cells: pd.DataFrame) -> pd.Series:
+    """Metres of trail in each cell that the prediction and the annotation disagree on."""
+    return cells["annotated_only"] + cells["predicted_only"]
+
+
 def weak_cells(cells: pd.DataFrame) -> pd.DataFrame:
     """
-    The cells of one tile that scored below the pass threshold, worst first, with a
-    'where' column saying which part of the tile each is in.
+    The cells of one tile that scored below the pass threshold, with a 'where' column
+    saying which part of the tile each is in.
+
+    They are ordered by how much trail is in dispute, most first, not by score. A cell
+    holding 6 m of trail, none of it matched, scores 0; a cell with 60 m unmatched out of
+    100 scores 0.4. The second is ten times the work to check and ten times the trail
+    that is wrong somewhere, so it comes first.
     """
-    weak = cells[cells["iou"].notna() & (cells["iou"] < FAIL_IOU_THRESHOLD)].sort_values(
-        ["iou", "cell_row", "cell_col"])
+    weak = cells[cells["iou"].notna() & (cells["iou"] < FAIL_IOU_THRESHOLD)]
+    weak = weak.assign(in_dispute=in_dispute(weak)).sort_values(
+        ["in_dispute", "iou", "cell_row", "cell_col"], ascending=[False, True, True, True])
     extent = (cells["minx"].min(), cells["miny"].min(), cells["maxx"].max(), cells["maxy"].max())
     return weak.assign(where=[compass(cell, extent) for _, cell in weak.iterrows()])
 
@@ -118,4 +129,4 @@ def describe_weak_cells(cells: pd.DataFrame) -> str:
     more = f"; and {len(weak) - len(listed)} more" if len(weak) > len(listed) else ""
 
     return (f"Weak areas: {len(weak)} of {len(scored)} grid cells with trail in them scored "
-            f"below the threshold ({spread}). Worst first: {details}{more}.")
+            f"below the threshold ({spread}). Most trail in dispute first: {details}{more}.")

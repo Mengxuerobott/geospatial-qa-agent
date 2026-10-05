@@ -36,7 +36,8 @@ COLUMNS = ["tile_id", "cell", "location", "match", "matched_m", "annotated_only_
 
 def review_list(tiles: pd.DataFrame, cells: pd.DataFrame) -> gpd.GeoDataFrame:
     """
-    One square per weak cell, worst first within each tile, in longitude and latitude.
+    One square per weak cell, most trail in dispute first within each tile, in longitude
+    and latitude.
 
     tiles needs tile_id and crs; cells is cell_metrics rows for those tiles. A tile whose
     CRS was not recorded cannot be placed on a map and is left out.

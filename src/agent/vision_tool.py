@@ -171,6 +171,12 @@ Answer the question you are asked directly and concisely. Report only what is vi
 something is not visible or you cannot tell at this resolution, say so rather than guessing.
 Do not give generic advice about how to inspect an image."""
 
+# The most the vision model may write, for a whole tile and for a cell with lines on it
+TILE_REPLY_TOKENS = 500
+CELL_REPLY_TOKENS = 1000
+CUT_OFF_NOTE = ("\n\n[This reply was cut off at its length limit. There may be more places "
+                "than it describes; ask about one part of the cell at a time.]")
+
 # Added when the square comes with a second copy that has the two sets of lines drawn on it
 TRAILS_PROMPT = """
 
@@ -245,7 +251,10 @@ def analyze_image_visually(image_path: str, user_prompt: str, bounds=None,
             Annotated=ANNOTATED[0].capitalize(), Predicted=PREDICTED[0].capitalize())
 
     # Initialize the Vision LLM
-    vision_llm = ChatOpenAI(model=vision_model(), max_tokens=500, temperature=0)
+    # A cell with lines on it is asked about each place they disagree, which takes more
+    # room than describing a tile
+    max_tokens = TILE_REPLY_TOKENS if trails is None else CELL_REPLY_TOKENS
+    vision_llm = ChatOpenAI(model=vision_model(), max_tokens=max_tokens, temperature=0)
     
     # Construct the Multimodal Message
     message = HumanMessage(
@@ -254,7 +263,11 @@ def analyze_image_visually(image_path: str, user_prompt: str, bounds=None,
     
     logger.info("Sending %d image(s) to %s for visual analysis", len(images), vision_model())
     response = vision_llm.invoke([SystemMessage(content=system_prompt), message])
-    
+
+    # Cut off at the limit, the reply stops mid-list with nothing to show for it, and the
+    # agent would report the places it got to as if they were all there are
+    if (getattr(response, "response_metadata", None) or {}).get("finish_reason") == "length":
+        return response.content + CUT_OFF_NOTE
     return response.content
 
 # --- Test the Vision Tool ---

@@ -78,7 +78,9 @@ def get_duckdb_metrics(tile_id: str) -> str:
             f"{row['annotated_only']:.0f} m annotated but not predicted, "
             f"{row['predicted_only']:.0f} m predicted but not annotated."
         )
-    if cells is None or cells.empty:
+    # A database built before the trail lengths were recorded has cells but not the
+    # columns the description is written from
+    if cells is None or cells.empty or "annotated_only" not in cells.columns:
         return metrics
     return f"{metrics}\n{describe_weak_cells(cells)}"
 
@@ -229,7 +231,8 @@ def create_graph_agent(checkpointer=None):
     lines run, and reports whether a trail is visible where they disagree; the whole tile
     is too coarse for that. Its reading of a thin trail can be wrong, so pass it on as what
     the image appears to show, and as a place for a person to check, not as settled. When
-    it cannot tell, say so. Look at the worst one or two cells, not every cell listed.
+    it cannot tell, say so. Look at the first one or two cells listed, which have the most trail in
+    dispute, not every cell.
     Never pass a cell name the metrics tool did not give you."""
 
     # LangGraph's prebuilt ReAct agent handles the complex routing/state automatically

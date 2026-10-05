@@ -8,7 +8,7 @@ from matplotlib.colors import LinearSegmentedColormap, Normalize
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch, Rectangle
 
-from src.agent.cells import cell_name
+from src.agent.cells import cell_name, in_dispute
 from src.agent.verdict import FAIL_IOU_THRESHOLD
 from src.metrics.shapefiles import read_trails
 
@@ -17,7 +17,7 @@ from src.metrics.shapefiles import read_trails
 # green and red already mean ground truth and prediction on this map.
 ERROR_CMAP = LinearSegmentedColormap.from_list(
     "cell_error", ["#cde2fb", "#6da7ec", "#256abf", "#0d366b"])
-# Past this many, naming every failing cell hides the map; the worst are named
+# Past this many, naming every failing cell hides the map; those with most in dispute are
 MAX_CELL_LABELS = 20
 # The base image is read at no more than this many pixels on its long edge
 MAX_MAP_PX = 2000
@@ -49,7 +49,13 @@ def _draw_cells(ax, cells):
                 cell["maxy"] - cell["miny"],
                 facecolor="none", edgecolor="white", linewidth=1.5, zorder=3))
 
-    worst = scored[scored["iou"] < FAIL_IOU_THRESHOLD].nsmallest(MAX_CELL_LABELS, "iou")
+    # Named in the order the agent and the review list use: most trail in dispute first.
+    # Without the lengths, as in a database built before they were recorded, by score.
+    failing = scored[scored["iou"] < FAIL_IOU_THRESHOLD]
+    if {"annotated_only", "predicted_only"} <= set(failing.columns):
+        worst = failing.assign(in_dispute=in_dispute(failing)).nlargest(MAX_CELL_LABELS, "in_dispute")
+    else:
+        worst = failing.nsmallest(MAX_CELL_LABELS, "iou")
     for _, cell in worst.iterrows():
         ax.text((cell["minx"] + cell["maxx"]) / 2, (cell["miny"] + cell["maxy"]) / 2,
                 cell_name(cell["cell_row"], cell["cell_col"]),
