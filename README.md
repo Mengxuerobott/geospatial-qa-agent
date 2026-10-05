@@ -21,9 +21,9 @@ tile in the viewer and ask *"why did this one do badly?"* without typing its ID.
 ## Architecture
 
 ```
-Streamlit UI  ──HTTP──>  FastAPI  ──>  LangGraph ReAct agent (gpt-4o-mini)
+Streamlit UI  ──HTTP──>  FastAPI  ──>  LangGraph ReAct agent (AGENT_MODEL)
                                             ├── get_duckdb_metrics   → DuckDB
-                                            └── run_vision_analysis  → TIFF → JPEG → gpt-4o-mini
+                                            └── run_vision_analysis  → TIFF → JPEG → VISION_MODEL
 ```
 
 The metrics in DuckDB are produced ahead of time by a batch pipeline
@@ -141,6 +141,22 @@ set PYTHONIOENCODING=utf-8
 A tile fails QA below an IoU of 0.75 (`FAIL_IOU_THRESHOLD` in `src/agent/verdict.py`). The
 metrics tool returns the verdict next to the IoU, so the LLM never decides for itself what
 counts as a failure.
+
+#### Choosing the models
+
+Two settings in `.env` choose the OpenAI models (`src/agent/models.py`). Both default to
+`gpt-4o-mini`.
+
+| Setting | Used for |
+| --- | --- |
+| `AGENT_MODEL` | The ReAct agent: reads the question, calls the tools, writes the answer |
+| `VISION_MODEL` | The vision tool: looks at the tile or the cell |
+
+They are separate because the jobs are. Judging whether a thin trail is visible in a crop
+is the hardest thing asked of any model here, so `VISION_MODEL` is the one to try a stronger
+model on first. The eval run records both names with the experiment, so runs with different
+models can be compared. The two eval judges stay on a fixed model, since a yardstick that
+changes with the model under test cannot compare two of them.
 
 ### The metrics tool and the pipeline (`src/metrics/pipeline.py`)
 
@@ -497,6 +513,7 @@ src/
   agent/
     graph_agent.py         the LangGraph ReAct agent and its two tools
     history.py             the window of recent turns sent to the LLM
+    models.py              which model the agent and the vision tool use
     verdict.py             the match tolerance and the IoU threshold below which a tile fails
     cells.py               describes a tile's weak areas from its grid cells
     tiles.py               what a tile ID may look like
@@ -525,6 +542,7 @@ tests/
   test_database.py         several people can read while the database is rebuilt
   test_evaluators.py       proves the scorers can fail
   test_history.py          the history window never orphans a tool result
+  test_models.py           the models come from the environment, the judges do not
   test_pipeline.py         image metrics ignore padding; cells are scored and placed correctly
   test_retry.py            rate-limit retries
   test_review.py           the review list holds the right cells in the right place
