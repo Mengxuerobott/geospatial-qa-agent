@@ -23,6 +23,12 @@ load_dotenv(dotenv_path=env_path)
 
 DB_PATH = os.path.join(root_dir, "data", "metrics.duckdb")
 TIFF_DIR = os.path.join(root_dir, "data", "tiffs")
+GT_DIR = os.path.join(root_dir, "data", "ground_truth")
+PRED_DIR = os.path.join(root_dir, "data", "predictions")
+
+# A cell is shown with this much of its surroundings, in metres, so a line just across
+# its edge, which the scoring matched against, is in the picture too
+CROP_MARGIN_M = 2 * MATCH_TOLERANCE_M
 
 # --- Agent Tool 1: The Data Analyst (DuckDB) ---
 @tool
@@ -82,7 +88,9 @@ def run_vision_analysis(tile_id: str, specific_question: str, cell: Optional[str
 
     Without cell it sees the whole tile, downscaled: enough for land cover and lighting,
     too coarse for a thin trail. Pass cell, a name from the metrics tool's weak areas such
-    as "r1c5", to look at that one grid cell at close to full resolution.
+    as "r1c5", to look at that one grid cell at close to full resolution, with the
+    annotated and predicted trails drawn on a second copy. It then reports whether a trail
+    is visible where the two disagree.
     """
     # tile_id comes from the LLM and becomes part of a file path
     if not is_valid_tile_id(tile_id):
@@ -117,8 +125,11 @@ def run_vision_analysis(tile_id: str, specific_question: str, cell: Optional[str
     bounds = found.iloc[0]
     return analyze_image_visually(
         tiff_path, specific_question,
-        bounds=(bounds["minx"], bounds["miny"], bounds["maxx"], bounds["maxy"]),
+        bounds=(bounds["minx"] - CROP_MARGIN_M, bounds["miny"] - CROP_MARGIN_M,
+                bounds["maxx"] + CROP_MARGIN_M, bounds["maxy"] + CROP_MARGIN_M),
         location=compass(bounds, extent),
+        trail_zips=(os.path.join(GT_DIR, f"{tile_id}.zip"),
+                    os.path.join(PRED_DIR, f"{tile_id}.zip")),
     )
 
 # --- Viewer context ---
@@ -211,8 +222,11 @@ def create_graph_agent(checkpointer=None):
     the list.
 
     To see what is behind a weak area, call the vision tool with that cell's name. It then
-    looks at that cell alone at full resolution, where a thin trail is visible; the whole
-    tile is too coarse for that. Look at the worst one or two cells, not every cell listed.
+    looks at that cell alone at full resolution, sees where the annotated and the predicted
+    lines run, and reports whether a trail is visible where they disagree; the whole tile
+    is too coarse for that. Its reading of a thin trail can be wrong, so pass it on as what
+    the image appears to show, and as a place for a person to check, not as settled. When
+    it cannot tell, say so. Look at the worst one or two cells, not every cell listed.
     Never pass a cell name the metrics tool did not give you."""
 
     # LangGraph's prebuilt ReAct agent handles the complex routing/state automatically
