@@ -83,6 +83,10 @@ You need Python and an OpenAI API key.
    data/predictions/<tile_id>.zip
    ```
 
+   Each TIFF must be in a projected CRS measured in metres, such as its UTM zone. The
+   pipeline skips a tile in degrees or feet and says so, because the 5 m tolerance and
+   50 m cells would silently mean something else there. Files must end in `.tif`.
+
 4. Build the metrics database. Without it the agent has nothing to query:
 
    ```bash
@@ -203,6 +207,11 @@ pixels only (the alpha band and the no-data padding are left out):
 | `shadow_fraction` | Share of pixels whose brightest band is under 25% of full scale |
 | `greenness` | Excess Green index, `(2G − R − B) / (R + G + B)`: vegetation cover |
 | `sharpness` | Variance of the Laplacian: low when the imagery is blurred |
+
+All five are measured on a 0 to 255 scale whatever the bit depth. For 8-bit imagery full
+scale is 255. For deeper imagery it is the brightest the tile actually gets (its 99.9th
+percentile), because a 12-bit camera writing a 16-bit file never comes near 65,535, and
+measured against that every pixel would count as shadow.
 
 The cells are windows read out of the TIFF; the image is never cut up. Each cell keeps its
 row, column and map bounds, so it can be drawn back onto the whole tile. Three rules keep
@@ -376,8 +385,12 @@ not record what the vision tool said about a cell, since that is only asked for 
 Tracing is off unless you turn it on. With `LANGCHAIN_TRACING_V2` unset or `false`, the
 `@traceable` decorators do nothing.
 
-To turn it on, fill in `LANGCHAIN_API_KEY` in `.env` (from smith.langchain.com → Settings →
-API Keys). The project named in `LANGCHAIN_PROJECT` is created on the first trace.
+To turn it on, set `LANGCHAIN_TRACING_V2=true` in `.env` and fill in `LANGCHAIN_API_KEY`
+(from smith.langchain.com → Settings → API Keys). The project named in `LANGCHAIN_PROJECT`
+is created on the first trace.
+
+With tracing on, every question, tool call and answer is sent to LangSmith, including what
+other people type into the chat. Leave it off for everyday use if that is not wanted.
 
 To check the key works:
 
@@ -419,7 +432,9 @@ To remove tracing, delete the decorators and the `from langsmith import traceabl
 ## Evals
 
 A prompt change that fixes one case can silently break another. `evals/` measures that
-instead of leaving it to trying the chat by hand. The evals need LangSmith.
+instead of leaving it to trying the chat by hand. The evals need LangSmith: a real
+`LANGCHAIN_API_KEY` in `.env`. They trace their own runs whether or not everyday tracing is
+turned on.
 
 ```bash
 python evals/dataset.py
@@ -433,9 +448,13 @@ The first command pushes the dataset; re-run it after editing the dataset. The s
 the agent against it and creates a new LangSmith experiment each time, so two prompts can be
 compared side by side. `--prefix` sets the experiment name prefix (default `react-agent`).
 
-The dataset lives in `evals/dataset.py`, so it is diffable and reviewable. Reference IoU
-values are read from DuckDB when the dataset is pushed, so re-running the pipeline on
-different imagery does not invalidate them.
+The dataset lives in `evals/dataset.py`, so it is diffable and reviewable. Nothing in it
+is tied to a particular tile or score. When the dataset is pushed, the tiles are chosen from
+the database: the worst tile, the three best that passed, and the two nearest the threshold
+on either side. The reference IoU values are read at the same time. So rebuilding the
+database on different imagery, or changing how the IoU is measured, does not leave the
+examples asking about a "failed" tile that now passes. The push prints which tile got which
+part, and stops with a reason if no tile fails or fewer than three pass.
 
 ### What is tested
 
@@ -446,7 +465,7 @@ Nineteen examples covering six things:
 | **Routing** | A metrics-only question does not open a 300 MB TIFF; a visual question does; a diagnostic question uses both tools |
 | **Grounding** | The answer quotes the IoU that is in DuckDB, not a plausible nearby number |
 | **Limits** | A tile that does not exist, and a question (weather) that no tool can answer, are admitted rather than answered |
-| **False premises** | Four questions claim that a tile scoring 0.95 or more failed; the agent must contradict them |
+| **False premises** | Four questions claim that one of the best-scoring tiles failed; the agent must contradict them |
 | **Verdict** | A tile that failed is called failed and a tile that passed is called passed, on either side of the 0.75 threshold |
 | **Conversation** | Six cases where the tile is not in the question and must come from earlier turns or the viewer |
 
@@ -540,6 +559,7 @@ tests/
   test_api.py              what the chat endpoint says when something goes wrong
   test_cells.py            weak areas are counted, located and never called an IoU
   test_database.py         several people can read while the database is rebuilt
+  test_dataset.py          the eval examples follow the scores in the database
   test_evaluators.py       proves the scorers can fail
   test_history.py          the history window never orphans a tool result
   test_models.py           the models come from the environment, the judges do not
