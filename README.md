@@ -293,8 +293,16 @@ checkpointer, every call is a fresh single-turn conversation.
 | `thread_id` | no | Identifies the conversation; omit it for a one-off question with no memory |
 | `selected_tile` | no | The tile open in the viewer, passed to the agent as a `[Viewer: tile … is open]` prefix on the message |
 
-The response is `reply` and the `thread_id` that was used. A `selected_tile` that does not
-look like a tile ID gets a 422. `GET /` is a health check.
+The response is `reply` and the `thread_id` that was used. `GET /` is a health check.
+
+| Status | When |
+| --- | --- |
+| 422 | `selected_tile` does not look like a tile ID |
+| 429 | OpenAI's rate limit was reached; the message says to wait a minute |
+| 500 | Anything else. The reply says only that the agent could not answer; the error itself goes to the API log, since it can hold file paths and upstream responses |
+
+The API logs each question with its thread and tile. Set `LOG_LEVEL` (default `INFO`) to
+change how much it logs.
 
 ### The frontend (`app/main.py`)
 
@@ -310,7 +318,8 @@ a failure is never marked by shade alone. The name is the one the agent uses, so
 type *"look at r1c5"* in the chat. Cells with no trail in them were never scored and are
 left clear. When more than 20 cells fail, all are outlined and the worst 20 are named. The right column is the chat, which posts to the API. It
 sends one `thread_id` per browser session and the selected tile with every message; **New
-conversation** starts a fresh thread.
+conversation** starts a fresh thread. A question that gets no answer within five minutes is
+given up on with a message, so a stuck call cannot freeze the chat.
 
 The map is drawn once per tile and cached as a PNG, shared between everyone using the
 viewer. Streamlit reruns the whole page on every chat message, so without the cache each
@@ -470,11 +479,14 @@ hallucinated IoU, a fabricated score for a nonexistent tile, an unnecessary visi
 and asserts they score those 0. The judges' model call cannot be tested deterministically,
 so the response parsing is split out and tested directly.
 
-The unit tests need no API key:
+The unit tests need no API key and no data; they build their own tiles:
 
 ```bash
-pytest tests/ -q
+pytest -q
 ```
+
+GitHub Actions runs them on every push and pull request (`.github/workflows/tests.yml`),
+on Python 3.10, the version the Dockerfile uses.
 
 ## Layout
 
@@ -499,12 +511,16 @@ src/
     spatial_calculator.py  standalone polygon error helpers, unused
   xai_engine.py            QATriageEngine, a classifier variant, unused
 app/main.py                Streamlit dashboard and chat
+pyproject.toml             pytest settings
+.github/workflows/tests.yml  runs the unit tests on every push
 evals/
   dataset.py               eval cases, versioned in git
   evaluators.py            six code scorers plus two LLM judges
   run_evals.py             runs the agent against the dataset
   retry.py                 waits out OpenAI rate limits
 tests/
+  conftest.py              a placeholder key and tracing off, for every test
+  test_api.py              what the chat endpoint says when something goes wrong
   test_cells.py            weak areas are counted, located and never called an IoU
   test_database.py         several people can read while the database is rebuilt
   test_evaluators.py       proves the scorers can fail
