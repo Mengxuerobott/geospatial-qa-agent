@@ -10,6 +10,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # The agent itself runs behind the FastAPI backend; this app only talks to it over HTTP
 from src.metrics.visualizer import plot_tile_results
+from src.agent.verdict import FAIL_IOU_THRESHOLD
 
 # --- Page Config ---
 st.set_page_config(page_title="Geospatial QA Agent", layout="wide")
@@ -48,9 +49,27 @@ with col1:
         gt_path = os.path.join(base_dir, 'ground_truth', f'{selected_tile}.zip')
         pred_path = os.path.join(base_dir, 'predictions', f'{selected_tile}.zip')
         
+        # The tile's grid cells, if the database has them. A database built before the
+        # pipeline scored cells has no such table; the map is then drawn without them.
+        cells = None
+        if os.path.exists(db_path):
+            try:
+                with duckdb.connect(db_path, read_only=True) as conn:
+                    cells = conn.execute(
+                        "SELECT * FROM cell_metrics WHERE tile_id = ?", [selected_tile]).df()
+            except duckdb.Error:
+                cells = None
+        has_cells = cells is not None and not cells.empty
+        show_cells = has_cells and st.checkbox(
+            "Show where the model did badly", value=True,
+            help="Shades each grid cell by how much of its trail the model missed or "
+                 "wrongly predicted. Cells below the pass threshold are outlined and named; "
+                 "use the name in the chat, e.g. \"look at r1c5\".")
+
         with st.spinner(f"Loading map for {selected_tile}..."):
             try:
-                fig = plot_tile_results(tiff_path, gt_path, pred_path, selected_tile)
+                fig = plot_tile_results(tiff_path, gt_path, pred_path, selected_tile,
+                                        cells=cells if show_cells else None)
                 st.pyplot(fig)
             except Exception as e:
                 st.error(f"Could not load map: {e}")
@@ -65,10 +84,16 @@ with col1:
                     df_metrics = conn.execute(query, [selected_tile]).df()
                     
                 if not df_metrics.empty:
-                    m1, m2, m3 = st.columns(3)
+                    m1, m2, m3, m4 = st.columns(4)
                     m1.metric("IoU Score", f"{df_metrics['iou'].iloc[0]:.4f}")
                     m2.metric("Brightness", f"{df_metrics['brightness'].iloc[0]:.1f}")
                     m3.metric("Contrast", f"{df_metrics['contrast'].iloc[0]:.1f}")
+                    if has_cells:
+                        scored = cells[cells["iou"].notna()]
+                        failing = int((scored["iou"] < FAIL_IOU_THRESHOLD).sum())
+                        m4.metric("Cells failing", f"{failing} of {len(scored)}",
+                                  help="Grid cells with trail in them that scored below "
+                                       "the pass threshold.")
                 else:
                     st.info("No metrics found in database for this tile. Did you run the pipeline?")
             except Exception as e:
