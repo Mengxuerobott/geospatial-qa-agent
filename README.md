@@ -6,7 +6,7 @@ It is a single LangGraph ReAct agent with two tools:
 
 | Tool | What it does |
 | --- | --- |
-| `get_duckdb_metrics` | Reads the tile's IoU, pass/fail verdict and SHAP values from DuckDB |
+| `get_duckdb_metrics` | Reads the tile's IoU, pass/fail verdict, SHAP values and weak areas from DuckDB |
 | `run_vision_analysis` | Sends the tile image to a vision model and reports what is visible |
 
 Ask *"why did tile SE-31-18-03-W fail?"* and the agent looks up the numbers, then looks at the
@@ -171,8 +171,22 @@ Everything is written to `data/metrics.duckdb`, in two tables:
 | `tile_metrics` | tile | whole-tile IoU, brightness and contrast, how many cells were scored and how many failed, and the mean SHAP value of its cells for each attribute |
 | `cell_metrics` | grid cell | position and map bounds, the five attributes, the cell's IoU, and its own SHAP values |
 
-`get_duckdb_metrics` reads `tile_metrics`. Nothing reads `cell_metrics` yet: the agent and
-the viewer still report per tile.
+`get_duckdb_metrics` reads both. Its reply is the tile's IoU, verdict and SHAP values,
+followed by the tile's weak areas: how many cells scored below the threshold, which part of
+the tile they are in, and the worst five by name, for example:
+
+```text
+Weak areas: 3 of 40 grid cells with trail in them scored below the threshold (3 in the
+north-east). Worst first: cell r1c6 (north-east): trail missed entirely, main driver
+shadow_fraction (0.82); ...
+```
+
+A cell is named by its row from the top and its column from the left. Cell scores are given
+as percentages and never called an IoU, so neither the LLM nor the `iou_grounded` scorer can
+mistake one for the tile's IoU. Weak areas never change the verdict: a tile that passed
+with weak areas still passed, and the agent reports them after the verdict.
+
+The viewer does not draw the cells yet, and the vision tool still looks at the whole tile.
 
 ### The vision tool (`src/agent/vision_tool.py`)
 
@@ -362,6 +376,7 @@ src/
     graph_agent.py         the LangGraph ReAct agent and its two tools
     history.py             the window of recent turns sent to the LLM
     verdict.py             the IoU threshold below which a tile fails
+    cells.py               describes a tile's weak areas from its grid cells
     tiles.py               what a tile ID may look like
     vision_tool.py         TIFF → resized JPEG → base64, and the vision call
     qa_agent.py            earlier AgentExecutor version, unused
@@ -379,6 +394,7 @@ evals/
   run_evals.py             runs the agent against the dataset
   retry.py                 waits out OpenAI rate limits
 tests/
+  test_cells.py            weak areas are counted, located and never called an IoU
   test_evaluators.py       proves the scorers can fail
   test_history.py          the history window never orphans a tool result
   test_pipeline.py         image metrics ignore padding; cells are scored and placed correctly
