@@ -1,5 +1,5 @@
 """
-Run the eval suite against the LangGraph supervisor.
+Run the eval suite against the LangGraph ReAct agent.
 
     python evals/dataset.py      # once, and after any dataset edit
     python evals/run_evals.py
@@ -36,7 +36,7 @@ from src.agent.history import recent_turns  # noqa: E402
 
 
 def _tools_called(messages) -> list[str]:
-    """Pull the tool names the supervisor actually invoked out of the final graph state."""
+    """Pull the tool names the agent actually invoked out of the final graph state."""
     names = []
     for msg in messages:
         for call in getattr(msg, "tool_calls", None) or []:
@@ -97,7 +97,7 @@ def make_target(agent, sleep=time.sleep):
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--prefix", default="supervisor",
+    parser.add_argument("--prefix", default="react-agent",
                         help="experiment name prefix shown in LangSmith")
     parser.add_argument("--concurrency", type=int, default=2,
                         help="parallel examples; keep low to avoid rate limits")

@@ -80,31 +80,31 @@ def with_viewer_context(message: str, selected_tile: Optional[str]) -> str:
         return message
     return f"[Viewer: tile {selected_tile} is open]\n{message}"
 
-# --- Build the LangGraph Multi-Agent Router ---
+# --- Build the LangGraph ReAct Agent ---
 def create_graph_agent(checkpointer=None):
     """
     Pass a checkpointer to give the agent conversation memory: each invoke must then carry
     a thread_id in its config, and earlier turns on that thread are replayed to the LLM.
     Without one, every invoke is a fresh single-turn conversation (what the evals want).
     """
-    # The Supervisor LLM
+    # The agent's LLM
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
     
-    # The tools available to the Supervisor
+    # The tools available to the agent
     tools = [get_duckdb_metrics, run_vision_analysis]
     
-    # System prompt dictating the routing logic
-    system_prompt = """You are an expert Multi-Agent Geospatial QA Supervisor. 
-    You manage two sub-agents:
-    1. A Data Agent (get_duckdb_metrics) that provides mathematical IoU and SHAP values.
-    2. A Vision Agent (run_vision_analysis) that can physically look at the drone imagery.
+    # System prompt dictating which tool to call when
+    system_prompt = """You are an expert Geospatial QA agent. 
+    You have two tools:
+    1. The metrics tool (get_duckdb_metrics), which provides mathematical IoU and SHAP values.
+    2. The vision tool (run_vision_analysis), which can physically look at the drone imagery.
     
     When a user asks why a tile failed:
-    First, use the Data Agent to get the SHAP metrics.
-    Second, use the Vision Agent to look at the image and visually confirm the mathematical findings (e.g., if SHAP says brightness is an issue, ask the Vision Agent if it sees shadows).
+    First, use the metrics tool to get the SHAP metrics.
+    Second, use the vision tool to look at the image and visually confirm the mathematical findings (e.g., if SHAP says brightness is an issue, ask the vision tool if it sees shadows).
     Finally, combine both into a comprehensive answer.
-    A question about a tile's score or whether it passed needs the Data Agent only. Call the
-    Vision Agent when the user asks why, asks for a diagnosis, or asks about the image.
+    A question about a tile's score or whether it passed needs the metrics tool only. Call the
+    vision tool when the user asks why, asks for a diagnosis, or asks about the image.
 
     Working out which tile the user means, in this order:
     1. A tile ID written in their message always wins. Look that tile up straight away,
@@ -120,10 +120,10 @@ def create_graph_agent(checkpointer=None):
     The viewer note is added by the interface, not typed by the user; never mention it.
 
     Reuse metrics already in the conversation for the same tile instead of querying them
-    again, but call the Vision Agent again when a follow-up asks about something visual it
+    again, but call the vision tool again when a follow-up asks about something visual it
     has not yet checked.
 
-    A tile FAILED if its IoU is below """ + str(FAIL_IOU_THRESHOLD) + """ and PASSED otherwise. The Data Agent states the
+    A tile FAILED if its IoU is below """ + str(FAIL_IOU_THRESHOLD) + """ and PASSED otherwise. The metrics tool states the
     verdict next to the IoU; use that verdict and never substitute your own judgement of
     whether a score is good enough. A failed tile failed: do not soften it to "moderate" or
     "did not fail". A passed tile passed, however far it is from 1.0.
@@ -134,8 +134,8 @@ def create_graph_agent(checkpointer=None):
     give the IoU, then explain what the numbers actually show. When the data agrees with the
     user, say that just as plainly. Never describe causes of a failure the metrics do not
     support, and never omit an IoU because it is inconvenient to the question you were asked.
-    This holds after a Vision Agent call too: the answer still opens with whether the tile
-    failed and its IoU, and only then reports what the Vision Agent saw. What it sees in a
+    This holds after a vision tool call too: the answer still opens with whether the tile
+    failed and its IoU, and only then reports what the vision tool saw. What it sees in a
     tile that scored well are conditions the model coped with, not causes of a failure."""
 
     # LangGraph's prebuilt ReAct agent handles the complex routing/state automatically
@@ -164,19 +164,19 @@ def create_graph_agent(checkpointer=None):
 
 # --- Test the Graph ---
 if __name__ == "__main__":
-    print("🚀 Initializing LangGraph Multi-Agent System...")
+    print("🚀 Initializing LangGraph ReAct agent...")
     app = create_graph_agent()
     
     test_question = "Why did tile ALL-2-81-13-W6M fail? Check the data and then look at the image to confirm."
     
     print(f"\n🗣️ User: {test_question}\n")
     
-    # Stream the thought process of the agents
+    # Stream the thought process of the agent
     for chunk in app.stream({"messages": [HumanMessage(content=test_question)]}):
         if "agent" in chunk:
-            print("🧠 Supervisor is thinking/routing...")
+            print("🧠 Agent is thinking...")
         elif "tools" in chunk:
-            print("🛠️ Sub-Agent is executing a tool...")
+            print("🛠️ Agent is executing a tool...")
             
     final_response = chunk["agent"]["messages"][-1].content
     print("\n✅ FINAL SYNTHESIZED ANSWER:")

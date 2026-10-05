@@ -269,7 +269,7 @@ def sync() -> None:
     else:
         dataset = client.create_dataset(
             dataset_name=DATASET_NAME,
-            description="Routing and grounding checks for the geospatial QA supervisor.",
+            description="Routing and grounding checks for the geospatial QA agent.",
         )
         print(f"Created dataset {DATASET_NAME}")
 

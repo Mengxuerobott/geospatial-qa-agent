@@ -16,7 +16,7 @@ from src.agent.tiles import is_valid_tile_id
 # Initialize FastAPI App
 app = FastAPI(
     title="Geospatial QA Agent API",
-    description="REST API for the LangGraph Multi-Agent system.",
+    description="REST API for the LangGraph ReAct agent.",
     version="1.0.0"
 )
 
@@ -39,12 +39,12 @@ class ChatResponse(BaseModel):
 
 @app.get("/")
 def health_check():
-    return {"status": "API is running", "agent": "LangGraph Multi-Agent Active"}
+    return {"status": "API is running", "agent": "LangGraph ReAct agent active"}
 
 @app.post("/chat", response_model=ChatResponse)
 def chat_with_agent(request: ChatRequest):
     """
-    Receives a message from the frontend, passes it to the LangGraph Multi-Agent,
+    Receives a message from the frontend, passes it to the LangGraph ReAct agent,
     and returns the synthesized response.
     """
     # selected_tile is put into the prompt, so it must look like a tile ID and nothing else.

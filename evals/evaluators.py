@@ -1,5 +1,5 @@
 """
-Evaluators for the QA supervisor.
+Evaluators for the QA agent.
 
 Most of these are code, not LLM-as-judge: tool routing and quoted numbers are checkable
 directly against DuckDB, so a judge model would be slower, cost money, and add noise to a

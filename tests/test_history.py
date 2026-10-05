@@ -1,5 +1,5 @@
 """
-Tests for the history window sent to the supervisor.
+Tests for the history window sent to the agent.
 
     pytest tests/ -q
 """

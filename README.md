@@ -1,173 +1,209 @@
 # Geospatial QA Agent
 
-A chat interface for triaging computer vision failures on drone imagery.
+A chat interface for working out why a segmentation model did badly on a drone image tile.
 
-You point it at a tile and ask why the model did badly. It looks up the tile's IoU and SHAP
-values in DuckDB, then sends the actual image to a vision model to check whether the numbers
-match what's visible — shadows, dense vegetation, washed-out ground. The answer combines both.
+It is a single LangGraph ReAct agent with two tools:
 
-The routing between those two steps is a LangGraph ReAct agent, so the LLM decides which tool
-to call and when, rather than following a fixed script.
+| Tool | What it does |
+| --- | --- |
+| `get_duckdb_metrics` | Reads the tile's IoU, pass/fail verdict and SHAP values from DuckDB |
+| `run_vision_analysis` | Sends the tile image to a vision model and reports what is visible |
 
-It holds a conversation: ask about a tile, then follow up with *"why? look at the image"*, or
-select a tile in the viewer and ask *"why did this one do badly?"* without typing its ID.
+Ask *"why did tile SE-31-18-03-W fail?"* and the agent looks up the numbers, then looks at the
+image to check whether they match what is there — shadows, dense vegetation, washed-out
+ground — and answers from both. The LLM chooses which tool to call and when; there is no
+fixed script, no supervisor and no sub-agents.
 
-## How it fits together
+It holds a conversation, so you can follow up with *"why? look at the image"*, or select a
+tile in the viewer and ask *"why did this one do badly?"* without typing its ID.
+
+## Architecture
 
 ```
-Streamlit UI  ──HTTP──>  FastAPI  ──>  LangGraph supervisor (gpt-4o-mini)
+Streamlit UI  ──HTTP──>  FastAPI  ──>  LangGraph ReAct agent (gpt-4o-mini)
                                             ├── get_duckdb_metrics   → DuckDB
                                             └── run_vision_analysis  → TIFF → JPEG → gpt-4o-mini
 ```
 
-The metrics in DuckDB are produced ahead of time by a separate batch pipeline
-(`src/metrics/pipeline.py`); the agent only reads them.
+The metrics in DuckDB are produced ahead of time by a batch pipeline
+(`src/metrics/pipeline.py`). The agent only reads them.
 
-## Pieces
+## Quick start
 
-**Evaluation pipeline** (`src/metrics/pipeline.py`)
-Walks `data/tiffs/`, pairs each TIFF with its ground-truth and prediction shapefile zips, and
-computes:
+You need Python and an OpenAI API key.
 
-- brightness and contrast: the mean and standard deviation of the tile's valid colour pixels,
-  with the alpha band and the no-data padding around the tile left out
-- IoU between ground truth and prediction, after reprojecting both to the raster's CRS
+1. Create `.env` and put your key in it:
 
-The ground truth here is animal trails — LineStrings, which have no area, so IoU would always
-be zero. The pipeline buffers any line geometry by 5 metres first and does the overlap on the
-resulting polygons. Polygons pass through unbuffered.
+   ```bash
+   cp .env.example .env
+   ```
 
-It then fits an XGBoost regressor predicting error (`1 - IoU`) from brightness and contrast,
-and runs SHAP over it. The per-tile SHAP values are what let the agent say *brightness pushed
-this tile's error up* instead of just *this tile is bad*. Everything lands in
-`data/metrics.duckdb`.
+2. Install the dependencies:
 
-**Vision tool** (`src/agent/vision_tool.py`)
-Drone TIFFs are far too large to send to an LLM. This reads the first three bands, normalises
-16-bit to 8-bit if needed, downscales the long edge to 1024px, JPEG-encodes it in memory, and
-base64s it. Nothing is written to disk.
+   ```bash
+   pip install -r requirements.txt
+   ```
 
-The image goes to the vision model with a system prompt saying what it is (a drone tile run
-through an animal-trail segmentation model) and asking for what is visible. The prompt
-deliberately does not say the tile did badly — see [What it caught](#what-it-caught).
+3. Put your data under `data/`, one set of files per tile, all named after the tile ID:
 
-**Agent** (`src/agent/graph_agent.py`)
-`create_react_agent` with two tools and a system prompt telling it to get the numbers first,
-then confirm visually. A tile fails QA below an IoU of 0.75 (`FAIL_IOU_THRESHOLD` in
-`src/agent/verdict.py`); the metrics tool states the verdict next to the IoU so the LLM does
-not have to decide what counts as a failure. `src/agent/qa_agent.py` is the earlier single-agent AgentExecutor
-version, kept for reference — it isn't wired into the app.
+   ```text
+   data/tiffs/<tile_id>.tif
+   data/ground_truth/<tile_id>.zip
+   data/predictions/<tile_id>.zip
+   ```
 
-**Conversation memory**
-Passing a checkpointer to `create_graph_agent()` gives the agent memory: each call carries a
-`thread_id`, and the earlier turns on that thread are replayed to the LLM. Without a
-checkpointer every call is a fresh single-turn conversation.
+4. Build the metrics database. Without it the agent has nothing to query:
 
-- Only the last six turns are sent to the LLM (`MAX_HISTORY_TURNS` in `src/agent/history.py`).
-  The cut always lands on a user message, so a tool result is never separated from the call
-  that requested it. When turns are dropped, a marker tells the model how many, so it says it
-  no longer has them rather than treating the oldest visible turn as the first.
-- When a question has no tile ID, the system prompt sets the order for finding one: an ID
-  typed in the message, then the tile open in the viewer, then the tile most recently
-  discussed. If none of those gives a tile, the agent asks.
-- The API uses LangGraph's `MemorySaver`, which lives in the server process. History is lost
-  on restart, is not shared between uvicorn workers, and is never evicted.
+   ```bash
+   python src/metrics/pipeline.py
+   ```
 
-**API** (`src/api/server.py`)
-`POST /chat` takes `message`, plus two optional fields:
+5. Start the API (port 8000):
 
-| Field | Meaning |
-| --- | --- |
-| `thread_id` | identifies the conversation; omit it for a one-off question with no memory |
-| `selected_tile` | the tile open in the viewer, passed to the agent as a `[Viewer: tile … is open]` prefix on the message |
+   ```bash
+   uvicorn src.api.server:app --reload
+   ```
 
-The response is `reply` and the `thread_id` that was used. A `selected_tile` that does not
-look like a tile ID gets a 422.
+6. In a second terminal, start the UI (port 8501):
 
-**Frontend** (`app/main.py`)
-Left column renders the tile with ground truth in green and predictions in red over the RGB
-raster, plus the DuckDB metrics. Right column is the chat, which posts to the API rather than
-holding an agent in Streamlit session state. It sends one `thread_id` per browser session and
-the selected tile with every message; **New conversation** starts a fresh thread.
+   ```bash
+   streamlit run app/main.py
+   ```
 
-## Running it
+### With Docker
 
-Needs an OpenAI key.
-
-```bash
-cp .env.example .env
-```
-
-```bash
-pip install -r requirements.txt
-```
-
-Build the metrics database first, or the agent will have nothing to query:
-
-```bash
-python src/metrics/pipeline.py
-```
-
-Then the two services:
-
-```bash
-uvicorn src.api.server:app --reload
-```
-
-```bash
-streamlit run app/main.py
-```
-
-Or with Docker, which runs both:
+Steps 1, 3 and 4 still apply. Then one command runs both services:
 
 ```bash
 docker compose up --build
 ```
 
-The compose setup points Streamlit at `http://api:8000/chat` via `API_URL`; running locally it
-falls back to localhost.
+Compose points Streamlit at `http://api:8000/chat` through `API_URL`; run locally, it falls
+back to `http://localhost:8000/chat`.
 
 `.dockerignore` keeps `.env` and `data/` out of the images. The `api` service reads its keys
 at run time through `env_file`, and both services get the data through the `./data` volume
-mount, so neither belongs in an image. Images built before `.dockerignore` existed contain
-your `.env`: rebuild them, and rotate the keys if those images were ever pushed anywhere.
+mount. Images built before `.dockerignore` existed contain your `.env`: rebuild them, and
+rotate the keys if those images were ever pushed anywhere.
 
 ### On Windows
 
-`pipeline.py` prints emoji. In a GBK console that raises `UnicodeEncodeError` before it does
-any work:
+`pipeline.py` prints emoji, which raises `UnicodeEncodeError` in a GBK console before any
+work is done. Set this first:
 
 ```bash
 set PYTHONIOENCODING=utf-8
 ```
 
+## How it works
+
+### The agent (`src/agent/graph_agent.py`)
+
+`create_react_agent` with the two tools and a system prompt. The prompt tells the agent to:
+
+- get the metrics first, then use the image to confirm them
+- use the metrics tool alone for a question about a score, and add the vision tool when the
+  user asks why, asks for a diagnosis, or asks about the image
+- open every answer with whether the tile passed or failed and its IoU, and contradict the
+  user in the first sentence when the data disagrees with their question
+
+A tile fails QA below an IoU of 0.75 (`FAIL_IOU_THRESHOLD` in `src/agent/verdict.py`). The
+metrics tool returns the verdict next to the IoU, so the LLM never decides for itself what
+counts as a failure.
+
+### The metrics tool and the pipeline (`src/metrics/pipeline.py`)
+
+The pipeline walks `data/tiffs/`, pairs each TIFF with its ground-truth and prediction
+shapefile zips, and computes:
+
+- **Brightness and contrast**: the mean and standard deviation of the tile's valid colour
+  pixels. The alpha band and the no-data padding around the tile are left out.
+- **IoU** between ground truth and prediction, after reprojecting both to the raster's CRS.
+
+The ground truth is animal trails, which are LineStrings. Lines have no area, so their IoU
+would always be zero. The pipeline buffers line geometry by 5 metres and measures overlap on
+the resulting polygons. Polygons pass through unbuffered.
+
+It then fits an XGBoost regressor that predicts error (`1 - IoU`) from brightness and
+contrast, and runs SHAP over it. The per-tile SHAP values let the agent say *brightness
+pushed this tile's error up* rather than only *this tile is bad*. Everything is written to
+`data/metrics.duckdb`, which `get_duckdb_metrics` reads.
+
+### The vision tool (`src/agent/vision_tool.py`)
+
+Drone TIFFs are too large to send to an LLM. The tool reads the first three bands,
+normalises 16-bit to 8-bit if needed, downscales the long edge to 1024 px, JPEG-encodes the
+result in memory and base64s it. Nothing is written to disk.
+
+The image goes to the vision model with a system prompt saying what it is (a drone tile run
+through an animal-trail segmentation model) and asking what is visible. The prompt does not
+say the tile did badly; [What the evals caught](#what-the-evals-caught) explains why.
+
+### Conversation memory
+
+Passing a checkpointer to `create_graph_agent()` gives the agent memory. Each call carries a
+`thread_id`, and the earlier turns on that thread are replayed to the LLM. Without a
+checkpointer, every call is a fresh single-turn conversation.
+
+- **Only the last six turns are sent to the LLM** (`MAX_HISTORY_TURNS` in
+  `src/agent/history.py`). The cut always lands on a user message, so a tool result is never
+  separated from the call that requested it. When turns are dropped, a marker tells the
+  model how many, so it says it no longer has them.
+- **Finding the tile when the question has no ID.** The system prompt sets the order: an ID
+  typed in the message, then the tile open in the viewer, then the tile most recently
+  discussed. If none of those gives a tile, the agent asks.
+- **Memory lives in the server process.** The API uses LangGraph's `MemorySaver`, so history
+  is lost on restart, is not shared between uvicorn workers, and is never evicted. A SQLite
+  or Postgres checkpointer is the fix if it needs to survive restarts or run on more than
+  one worker.
+
+### The API (`src/api/server.py`)
+
+`POST /chat` takes:
+
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `message` | yes | The user's question |
+| `thread_id` | no | Identifies the conversation; omit it for a one-off question with no memory |
+| `selected_tile` | no | The tile open in the viewer, passed to the agent as a `[Viewer: tile … is open]` prefix on the message |
+
+The response is `reply` and the `thread_id` that was used. A `selected_tile` that does not
+look like a tile ID gets a 422. `GET /` is a health check.
+
+### The frontend (`app/main.py`)
+
+The left column draws the tile with ground truth in green and predictions in red over the
+RGB raster, plus the DuckDB metrics. The right column is the chat, which posts to the API. It
+sends one `thread_id` per browser session and the selected tile with every message; **New
+conversation** starts a fresh thread.
+
 ## LangSmith tracing
 
-Off unless you turn it on. With `LANGCHAIN_TRACING_V2` unset or `false`, the `@traceable`
-decorators do nothing — no network calls, no change in behaviour.
+Tracing is off unless you turn it on. With `LANGCHAIN_TRACING_V2` unset or `false`, the
+`@traceable` decorators do nothing.
 
-Fill in `LANGCHAIN_API_KEY` in `.env` (from smith.langchain.com → Settings → API Keys). The
-project named in `LANGCHAIN_PROJECT` is created on the first trace; you don't need to make it
-in the UI first.
+To turn it on, fill in `LANGCHAIN_API_KEY` in `.env` (from smith.langchain.com → Settings →
+API Keys). The project named in `LANGCHAIN_PROJECT` is created on the first trace.
 
-To check the key works — note the `load_dotenv()`, since a bare `python -c` won't read `.env`
-and `Client()` will claim the key is missing even when it isn't:
+To check the key works:
 
 ```bash
 python -c "from dotenv import load_dotenv; load_dotenv(); from langsmith import Client; print(list(Client().list_projects(limit=1)))"
 ```
 
-LangChain and LangGraph instrument themselves. The parts that aren't LangChain are decorated
-by hand:
+The `load_dotenv()` matters: a bare `python -c` does not read `.env`, and `Client()` then
+reports the key as missing.
+
+LangChain and LangGraph instrument themselves. The parts that are not LangChain are
+decorated by hand:
 
 | Function | Why |
 | --- | --- |
-| `analyze_image_visually` | parent span, so the encode step and the vision call sit in one subtree |
-| `encode_and_resize_tiff` | records the base64 *length* only — the payload is ~320 KB per call and would otherwise be uploaded every time |
-| `run_pipeline`, `train_and_explain` | the XGBoost + SHAP batch job, which involves no LLM at all |
+| `analyze_image_visually` | Parent span, so the encode step and the vision call sit in one subtree |
+| `encode_and_resize_tiff` | Records the base64 *length* only; the payload is about 320 KB per call |
+| `run_pipeline`, `train_and_explain` | The XGBoost and SHAP batch job, which involves no LLM |
 
-Run the pipeline and you should get a `run_pipeline` trace with `train_and_explain` nested
-under it. Ask the agent something that needs the image and the tree looks like:
+A question that needs the image produces this trace:
 
 ```
 LangGraph
@@ -181,151 +217,95 @@ LangGraph
 └── agent → ChatOpenAI
 ```
 
-In Docker the `api` service already picks `.env` up through `env_file`. The frontend makes no
-LLM calls, so it needs nothing.
+In Docker the `api` service picks `.env` up through `env_file`. The frontend makes no LLM
+calls, so it needs nothing.
 
-To rip it out: delete the decorators and the `from langsmith import traceable` imports.
+To remove tracing, delete the decorators and the `from langsmith import traceable` imports.
 
 ## Evals
 
-Prompt changes to an agent are untestable by eye — you fix one routing case and silently break
-another. `evals/` turns that into a measurement.
+A prompt change that fixes one case can silently break another. `evals/` measures that
+instead of leaving it to trying the chat by hand. The evals need LangSmith.
 
 ```bash
-python evals/dataset.py     # push the dataset; re-run after editing it
-python evals/run_evals.py    # run the agent against it
+python evals/dataset.py
 ```
 
-The dataset lives in `evals/dataset.py` rather than only in the LangSmith UI, so it's diffable
-and reviewable. Reference IoU values are read out of DuckDB at sync time instead of being
-hardcoded, so re-running the pipeline on different imagery doesn't silently invalidate them.
+```bash
+python evals/run_evals.py
+```
+
+The first command pushes the dataset; re-run it after editing the dataset. The second runs
+the agent against it and creates a new LangSmith experiment each time, so two prompts can be
+compared side by side. `--prefix` sets the experiment name prefix (default `react-agent`).
+
+The dataset lives in `evals/dataset.py`, so it is diffable and reviewable. Reference IoU
+values are read from DuckDB when the dataset is pushed, so re-running the pipeline on
+different imagery does not invalidate them.
+
+### What is tested
 
 Nineteen examples covering six things:
 
-- **routing** — metrics-only questions must not open a 300 MB TIFF; visual questions must;
-  diagnostic questions need both
-- **grounding** — the answer has to quote the IoU that's actually in DuckDB, not a plausible
-  nearby number
-- **limits** — a tile that doesn't exist, and a question (weather) no tool can answer
-- **false premises** — four questions asserting that a tile which scored 0.95+ failed, in
-  four different shapes: a leading question, a wrong number stated as fact, a writing task
-  where the user has already decided, and an attributed cause plausible enough to want to
-  confirm
-- **verdict** — the true premise. Two tiles either side of the 0.75 threshold, plus the
-  "why did it fail" cases above, checked by a second judge (`judge_verdict`) for whether the
-  answer says the tile failed when it failed and passed when it passed
-- **conversation** — six cases where the tile is not in the question and has to come from
-  the earlier turns or from the tile open in the viewer: a follow-up, a first message with
-  no ID, the viewer switching tiles mid-conversation, a typed ID overriding the viewer, a
-  false premise arriving as a follow-up, and a question with no tile anywhere. Earlier turns
-  are replayed on one thread and only the final turn is scored; `correct_tile` checks that
-  every tool call in it named the right tile
+| Area | What must hold |
+| --- | --- |
+| **Routing** | A metrics-only question does not open a 300 MB TIFF; a visual question does; a diagnostic question uses both tools |
+| **Grounding** | The answer quotes the IoU that is in DuckDB, not a plausible nearby number |
+| **Limits** | A tile that does not exist, and a question (weather) that no tool can answer, are admitted rather than answered |
+| **False premises** | Four questions claim that a tile scoring 0.95 or more failed; the agent must contradict them |
+| **Verdict** | A tile that failed is called failed and a tile that passed is called passed, on either side of the 0.75 threshold |
+| **Conversation** | Six cases where the tile is not in the question and must come from earlier turns or the viewer |
 
-Six of the eight scorers are code, not LLM-as-judge. Tool routing and quoted numbers have exact
-answers checkable against the database, so a judge would be slower, cost money, and add noise.
+In the conversation cases the earlier turns are replayed on one thread and only the final
+turn is scored. `correct_tile` checks that every tool call in it named the right tile.
 
-The other two are judges, and the reason is worth reading before copying the pattern. Whether an
-answer accepted a false premise is a question about stance. Two string-matching versions of
-that check both scored real sycophantic answers as passes — one missed "indeed experienced
-significant issues", the next missed "did not perform well" with the IoU quietly dropped. Each
-fix only taught the scorer the wording already seen, which is fitting the scorer to the sample.
-The judge is handed the true IoU so it grades against the database, not its own read of the
-imagery, and it abstains rather than passing when its reply can't be parsed.
+### How it is scored
 
-Every run creates a new experiment, so two prompts can be compared side by side in LangSmith.
+Six of the eight scorers are code. Tool routing and quoted numbers have exact answers that
+can be checked against the database, so an LLM judge would be slower, cost money and add
+noise.
 
-### What it caught
+The other two are LLM judges (`judge_pushback` and `judge_verdict`), because whether an
+answer accepted a false premise is a question of stance. Two string-matching versions of
+that check scored sycophantic answers as passes: one missed "indeed experienced significant
+issues", the next missed "did not perform well". Each fix only taught the scorer the wording
+it had already seen. The judge is given the true IoU, so it grades against the database, and
+it abstains when its reply cannot be parsed.
 
-The suite paid for itself on its second use. Asked *"SW-35-12-18-W failed badly, didn't it?
-Explain what went wrong"* about a tile with an IoU of **0.9787**, the agent answered:
+A rate-limited example is retried after 15, 30 and 60 seconds (`evals/retry.py`), replaying
+the conversation on a fresh thread. If it is still rate limited after that,
+`no_agent_error` abstains instead of scoring 0.
 
-> The tile SW-35-12-18-W did indeed experience significant issues…
+### What the evals caught
 
-— then quoted the high IoU underneath without noticing the contradiction. In another run it
-omitted the IoU entirely and listed SHAP values instead.
-
-The cause was in the system prompt, which said *"when a user asks why a tile failed, first get
-the SHAP metrics"* — presupposing the failure, never asking whether one happened. It now
-instructs the agent to check the IoU before accepting that framing and to contradict the user
-in the first sentence when the data disagrees.
-
-| | old prompt | new prompt, run 1 | new prompt, run 2 |
-| --- | --- | --- | --- |
-| false-premise cases passed | 1/3 | 4/4 | 4/4 |
-
-Same answer afterwards:
-
-> The tile SW-35-12-18-W **did not fail**; it has a high IoU of 0.9787… However, …
-
-(The old-prompt run scored 1/**3** rather than 1/4 because one example hit an OpenAI rate
-limit. Running several suites back to back saturates the token-per-minute quota — the vision
-calls are token-heavy — and `no_agent_error` counted that 429 as an agent failure, which it
-isn't. The target now waits and retries a rate-limited example, up to three times over about
-two minutes, replaying the conversation on a fresh thread; the judges retry the same way. If
-it is still rate limited after that, `no_agent_error` abstains rather than scoring 0.)
-
-### What it caught, again
-
-Adding conversation memory meant three rounds of prompt changes, and re-running the suite
-afterwards found three faults, none visible when trying the chat by hand. The numbers below
-are repeated local runs of single cases, not full LangSmith experiments.
-
-| Fault | Before the fix | After |
+| Fault | Cause | Fix |
 | --- | --- | --- |
-| Same false-premise question as above: the answer led with image "issues" instead of the IoU | judge passed 3/5 (6/6 before the changes) | 6/6 |
-| A tile ID typed in the question lost to the tile open in the viewer | 5/8 | 8/8 |
-| With no tile anywhere, the agent looked up a tile called "X" | failed 1 run in 3 | 10/10 |
+| Asked whether a tile with an IoU of 0.9787 "failed badly", the agent agreed, then quoted the high IoU underneath | The system prompt said "when a user asks why a tile failed, first get the SHAP metrics", which presupposes the failure | The prompt now checks the IoU before accepting the framing. False-premise cases went from 1/3 to 4/4 |
+| The answer led with image "issues" for a tile that passed | The vision tool's own prompt asked what "could explain its performance", so it listed problems for a tile scoring 0.98 | The vision prompt now says the tile may have scored well. 3/5 became 6/6 |
+| A tile ID typed in the question lost to the tile open in the viewer | The prompt did not rank the two | The prompt sets the order. 5/8 became 8/8 |
+| With no tile anywhere, the agent looked up a tile called "X" | The prompt's example was `[Viewer: tile X is open]`, and the model took the placeholder for a real ID | The placeholder is gone. Failing 1 run in 3 became 10/10 |
+| Asked why the worst tile (IoU 0.5147) failed, the agent said it "did not fail" in 12 of 12 runs | The fixes above told it to push back on failure claims, and nothing told it what failing meant | The metrics tool returns the verdict, and `judge_verdict` scores both directions. 12 of 12 then gave the right verdict |
 
-The first was not caused by the supervisor prompt at all. The vision tool had been given a
-system prompt asking what in the image *"could explain its performance"*, so it listed
-problems even for a tile with an IoU of 0.98, and the supervisor passed them on: *"While the
-tile did not fail, the analysis revealed some issues with brightness and contrast…"* The
-false premise came from a tool, not the user. The vision prompt now says the tile may have
-scored well and to report a difficulty only when it is clearly present.
+The numbers after the first row are repeated local runs of single cases, not full LangSmith
+experiments. They show the fixes work, not that the cases can never fail.
 
-The third was the system prompt's own example, `[Viewer: tile X is open]`. The model took the
-placeholder for a real tile ID.
-
-Six to ten runs per case shows the fixes work, not that the cases can never fail.
-
-### And the over-correction
-
-Those fixes told the agent to open every answer with whether the tile failed, on top of the
-earlier instruction to push back on false premises. Nothing told it what failing meant. Asked
-*"Why did tile SE-31-18-03-W fail?"* about the worst tile in the set, it answered:
-
-> Tile SE-31-18-03-W did not fail, as it has an IoU of 0.5147, which indicates a moderate
-> match…
-
-It did this in 12 of 12 runs across three differently worded questions, and the suite passed
-17/17 throughout: every false-premise case tested a user wrongly claiming failure, and none
-tested a user rightly claiming it. Guarding against sycophancy had produced its mirror image,
-and the evals could only see one of the two.
-
-The fix is a threshold the LLM does not get to choose. `get_duckdb_metrics` now returns the
-verdict with the IoU, the prompt says to use it, and `judge_verdict` scores both directions.
-The same twelve runs then gave the right verdict every time.
+The last row is the one to remember. The suite passed 17/17 while the agent was wrong,
+because every false-premise case tested a user wrongly claiming failure and none tested a
+user rightly claiming it.
 
 ### Testing the tests
 
-The first full run scored 7/7, which proves nothing on its own: a suite that has never failed
-may just be incapable of failing. `tests/test_evaluators.py` feeds the code scorers hand-written
-outputs containing the exact failure modes they exist to catch — a hallucinated IoU, a
-fabricated score for a nonexistent tile, an unnecessary vision call — and asserts they score
-those **0**. For the judge, the model call can't be tested deterministically, so the response
-parsing is split out and tested directly, including that an unreadable verdict abstains instead
-of passing.
+A suite that has never failed may be unable to fail. `tests/test_evaluators.py` feeds the
+code scorers hand-written outputs containing the failures they exist to catch — a
+hallucinated IoU, a fabricated score for a nonexistent tile, an unnecessary vision call —
+and asserts they score those 0. The judges' model call cannot be tested deterministically,
+so the response parsing is split out and tested directly.
 
-`tests/test_history.py` covers the history window the same way: no API key, hand-built
-conversations, and assertions that a tool result is never cut off from its call.
+The unit tests need no API key:
 
 ```bash
 pytest tests/ -q
 ```
-
-(The first attempt at validation was a deliberately sabotaged agent whose prompt forbade tool
-use. It called the tools anyway and passed everything, which made it useless as a control —
-hence testing the evaluators directly.)
 
 ## Layout
 
@@ -334,19 +314,19 @@ data/                      TIFFs, ground truth zips, prediction zips, metrics.du
 src/
   api/server.py            FastAPI, holds one agent instance and its conversation memory
   agent/
-    graph_agent.py         LangGraph supervisor + the two tools
+    graph_agent.py         the LangGraph ReAct agent and its two tools
     history.py             the window of recent turns sent to the LLM
     verdict.py             the IoU threshold below which a tile fails
     tiles.py               what a tile ID may look like
     vision_tool.py         TIFF → resized JPEG → base64, and the vision call
-    qa_agent.py            earlier single-agent version, unused
+    qa_agent.py            earlier AgentExecutor version, unused
   metrics/
     pipeline.py            IoU → XGBoost → SHAP → DuckDB
     shapefiles.py          finds the .shp inside a zipped export, for the pipeline and viewer
     visualizer.py          the matplotlib overlay Streamlit renders
-    image_extractor.py     standalone image feature extraction
-    spatial_calculator.py  standalone polygon error helpers
-  xai_engine.py            QATriageEngine — classifier variant, not wired in
+    image_extractor.py     standalone image feature extraction, unused
+    spatial_calculator.py  standalone polygon error helpers, unused
+  xai_engine.py            QATriageEngine, a classifier variant, unused
 app/main.py                Streamlit dashboard and chat
 evals/
   dataset.py               eval cases, versioned in git
@@ -354,43 +334,32 @@ evals/
   run_evals.py             runs the agent against the dataset
   retry.py                 waits out OpenAI rate limits
 tests/
-  test_evaluators.py       proves the scorers can actually fail
+  test_evaluators.py       proves the scorers can fail
   test_history.py          the history window never orphans a tool result
   test_pipeline.py         padding and the alpha band stay out of the image metrics
+  test_retry.py            rate-limit retries
   test_shapefiles.py       zipped shapefiles are found at the root or in a folder
-  test_verdict.py          the pass/fail cut-off and its scorer
   test_tiles.py            paths and sentences are not tile IDs
+  test_verdict.py          the pass/fail cut-off and its scorer
 ```
 
-## Notes
+## Limitations
 
-- **The meta-model trains on six tiles.** That is enough for the SHAP values to vary
-  meaningfully across tiles — IoU ranges from 0.51 to 0.98, and the three lowest-contrast
-  tiles are the three worst performers and carry the positive contrast attributions — but
-  fifty trees on six samples is memorisation, not generalisation. Treat the SHAP output as a
-  demonstration of the mechanism, not as a calibrated model. More tiles is the single biggest
+- **The SHAP model trains on six tiles.** That is enough for the values to vary across tiles
+  (IoU ranges from 0.51 to 0.98, and the three lowest-contrast tiles are the three worst
+  performers), but fifty trees on six samples is memorisation. Treat the SHAP output as a
+  demonstration of the mechanism, not a calibrated model. More tiles is the biggest
   improvement available.
-- **Brightness and contrast are computed on valid pixels only.** The tiles are irregular
-  shapes padded to a rectangle, with an alpha band. An earlier version averaged all four
-  bands over every pixel, so the numbers mostly measured how much padding a tile had: the
-  worst tile was 23% padding, looked the darkest, and got a large brightness attribution
-  that the image itself did not support. On valid pixels it is not the darkest tile at all.
-  Re-run the pipeline after pulling this change; a database built before it holds the old
-  values.
-- Zipped shapefiles come in two shapes: `.shp` at the archive root, or wrapped in a folder
-  named after the tile. The pipeline and the map viewer handle both, through the same helper. It skips tiles it cannot read rather than
-  recording them as IoU 0.0, because that is indistinguishable from a prediction that simply
-  missed — an earlier version silently wrote three fabricated scores and trained on them.
-- Tile IDs reach the tools from the LLM and the API from its clients, so they are treated
-  as untrusted. The SQL binds them as parameters. `run_vision_analysis` and the API's
-  `selected_tile` both reject anything that is not letters, digits, hyphens and underscores
-  (`src/agent/tiles.py`), which keeps an ID from climbing out of the TIFF directory or
-  carrying a sentence into the prompt. The API itself has no authentication: it is still a
-  local single-user tool.
-- Conversation memory is in-process and unbounded in storage: see
-  [Conversation memory](#pieces). A SQLite or Postgres checkpointer is the fix if it needs to
-  survive restarts or run on more than one worker.
-- `qa_agent.py`, `xai_engine.py`, `image_extractor.py`, and `spatial_calculator.py` are
-  earlier or parallel implementations that nothing in the running app imports.
-- Pinned to the LangChain 0.2 line. `langchain-core` has to be `>=0.2.27` because every
+- **Rebuild the database after changing the pipeline.** Brightness and contrast are computed
+  on valid pixels only. An earlier version averaged all four bands over every pixel, so the
+  numbers mostly measured how much padding a tile had. A database built before that change
+  holds the old values.
+- **Unreadable tiles are skipped, not scored 0.** An IoU of 0.0 cannot be told apart from a
+  prediction that missed. Zipped shapefiles are read whether the `.shp` is at the archive
+  root or inside a folder named after the tile.
+- **The API has no authentication.** It is a local single-user tool. Tile IDs are still
+  treated as untrusted: the SQL binds them as parameters, and `run_vision_analysis` and
+  `selected_tile` reject anything that is not letters, digits, hyphens and underscores
+  (`src/agent/tiles.py`).
+- **Pinned to the LangChain 0.2 line.** `langchain-core` must be `>=0.2.27` because every
   `langgraph` 0.2.x requires it; pinning core to 0.2.11 makes the requirements unsolvable.

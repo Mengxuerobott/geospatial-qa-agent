@@ -1,5 +1,5 @@
 """
-Bounding how much conversation history is sent to the supervisor LLM.
+Bounding how much conversation history is sent to the agent's LLM.
 
 Kept free of agent imports (OpenAI, DuckDB, rasterio) so it can be unit-tested without an
 API key.

@@ -13,13 +13,13 @@ from src.metrics.visualizer import plot_tile_results
 
 # --- Page Config ---
 st.set_page_config(page_title="Geospatial QA Agent", layout="wide")
-st.title("🌍 Explainable AI: Multi-Agent Geospatial QA")
+st.title("🌍 Explainable AI: Geospatial QA Agent")
 
 # One conversation per browser session; the API keys the agent's memory on this
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
 
-GREETING = {"role": "assistant", "content": "Hello! I am your Multi-Agent QA Supervisor. Ask me to check the metrics for a tile, or ask me to physically look at the drone imagery to explain a failure."}
+GREETING = {"role": "assistant", "content": "Hello! I am your Geospatial QA agent. Ask me to check the metrics for a tile, or ask me to physically look at the drone imagery to explain a failure."}
 
 if "messages" not in st.session_state:
     st.session_state.messages = [GREETING]
@@ -78,7 +78,7 @@ with col1:
 
 
 with col2:
-    st.subheader("💬 Chat with Multi-Agent Supervisor")
+    st.subheader("💬 Chat with the QA Agent")
     
     # Use environment variable for Docker, default to localhost for local testing
     API_URL = os.getenv("API_URL", "http://localhost:8000/chat")
@@ -104,7 +104,7 @@ with col2:
             
         # 2. Call the FastAPI Backend
         with st.chat_message("assistant"):
-            with st.spinner("Supervisor is coordinating Data & Vision Agents via API..."):
+            with st.spinner("Agent is querying the metrics and vision tools via API..."):
                 try:
                     # Send HTTP POST request to FastAPI
                     response = requests.post(
